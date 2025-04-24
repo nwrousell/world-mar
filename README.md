@@ -15,3 +15,8 @@
 - [MAR](https://arxiv.org/pdf/2406.11838)
 - [MARdini](https://arxiv.org/pdf/2410.20280)
 - [Oasis](https://oasis-model.github.io/)
+
+
+## Dataset
+- VPT dataset collected by OpenAI contractors
+- download script from [MineRL challenge](https://github.com/minerllabs/basalt-2022-behavioural-cloning-baseline)
