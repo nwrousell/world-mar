@@ -1,7 +1,7 @@
 # world-mar
 
 - [ ] dataloader w/ relative pose
-- [ ] ROPE embeddings
+- [ ] ROPE embeddings ([from WorldMem](https://github.com/xizaoqu/WorldMem/blob/main/algorithms/worldmem/models/rotary_embedding_torch.py))
 - [ ] retrieval func based on pose
 - [ ] Architecture
     - [ ] ST transformer
