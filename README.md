@@ -7,6 +7,7 @@
     - [ ] ST transformer
     - [ ] Oasis VAE
     - [ ] Diffusion Model
+    - [ ] _Optional:_ [Pose Predictor](https://github.com/xizaoqu/WorldMem/blob/main/algorithms/worldmem/models/pose_prediction.py)
 - [ ] training loop
 
 
