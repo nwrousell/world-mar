@@ -16,3 +16,4 @@
 - [MAR](https://arxiv.org/pdf/2406.11838)
 - [MARdini](https://arxiv.org/pdf/2410.20280)
 - [Oasis](https://oasis-model.github.io/)
+- [Rope](https://arxiv.org/pdf/2104.09864)
