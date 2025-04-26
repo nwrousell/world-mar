@@ -38,7 +38,7 @@ class WorldMAR(pl.LightningModule):
                  img_height=360, img_width=640,
                  encoder_embed_dim=512, encoder_depth=16, encoder_num_heads=16,
                  decoder_embed_dim=512, decoder_depth=16, decoder_num_heads=16,
-                 warmup_steps=1000 # TODO: change this depending on dataset size
+                 warmup_steps=10000 # TODO: change this depending on dataset size
     ):
         super().__init__()
         self.automatic_optimization = False
