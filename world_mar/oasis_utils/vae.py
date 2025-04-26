@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from timm.layers.mlp import Mlp
 from timm.layers.helpers import to_2tuple
-from oasis_utils.rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
-from oasis_utils.dit import PatchEmbed
+from world_mar.oasis_utils.rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
+from world_mar.oasis_utils.dit import PatchEmbed
 from safetensors.torch import load_model
 
 class DiagonalGaussianDistribution(object):

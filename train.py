@@ -5,6 +5,10 @@ import shutil
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
 import torch
+from torchvision.utils import save_image
+from torchvision.transforms.functional import resize
+from torchvision.io import read_image
+from einops import rearrange
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -32,6 +36,17 @@ def find_latest_checkpoint(logdir):
         raise FileNotFoundError(f"no checkpoints found in {checkpoint_dir}")
     latest_ckpt = max(ckpts, key=os.path.getctime)
     return latest_ckpt
+
+def load_prompt(path, video_offset=None, n_prompt_frames=1):
+    prompt = read_image(path)
+    # add frame dimension
+    prompt = rearrange(prompt, "c h w -> 1 c h w")
+    assert prompt.shape[0] == n_prompt_frames, f"input prompt {path} had less than n_prompt_frames={n_prompt_frames} frames"
+    prompt = resize(prompt, (360, 640))
+    # add batch dimension
+    prompt = rearrange(prompt, "t c h w -> 1 t c h w")
+    prompt = prompt.float() / 255.0
+    return prompt
 
 def main(args):
     # loading conf

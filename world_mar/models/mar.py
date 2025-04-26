@@ -17,9 +17,9 @@ from torch.optim.lr_scheduler import LinearLR
 
 from timm.models.vision_transformer import Block
 
-from models.diffloss import DiffLoss
+# from models.diffloss import DiffLoss
 
-from modules.utils import instantiate_from_config
+from world_mar.modules.utils import instantiate_from_config
 
 import pytorch_lightning as pl
 
@@ -44,12 +44,12 @@ class WorldMAR(pl.LightningModule):
         self.automatic_optimization = False
 
         # intialize the vae
-        self.instantiate_from_config(vae_config)
+        self.instantiate_vae(vae_config)
         
         # initialize diff loss
         # TODO: make cutomizable as MLP (per patch?) vs DiT (per frame).
         #       for now, assuming more lightweight MLP
-        self.diffloss = DiffLoss
+        # self.diffloss = DiffLoss
     
     def instantiate_vae(self, vae_config):
         self.vae = instantiate_from_config(vae_config)
