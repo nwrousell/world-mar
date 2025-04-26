@@ -1,6 +1,7 @@
 import os
 import datetime
 import shutil
+import torch
 
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
@@ -26,6 +27,29 @@ def main(args):
     # more shenanigans...
 
     # TODO: train!
+
+    dataloader = ...
+    vae = ...
+    model = ...
+    optimizer = ...
+
+    for batch in dataloader:
+        optimizer.zero_grad()
+        
+        # dataloader has already sampled context frames with high overlap and made poses relative
+        frame_to_pred, context_frames, context_relative_poses, actions = batch
+
+        all_frames = [frame_to_pred, context_frames] # stack these correctly
+        latents = vae.encode(all_frames)
+        context_latents, latent_to_pred = latents[0], latents[1:] # fix this
+
+        pred_latent = model(context_latents, context_relative_poses, actions) # does ROPE and action embedding
+
+        loss = diff_loss(pred_latent, latent_to_pred)
+        loss.backward()
+
+        optimizer.step()
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
