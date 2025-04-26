@@ -21,6 +21,7 @@ from timm.models.vision_transformer import Block
 
 from world_mar.modules.utils import instantiate_from_config
 from world_mar.oasis_utils.vae import AutoencoderKL
+from world_mar.models.diffloss import SimpleMLPAdaLN
 
 import pytorch_lightning as pl
 
@@ -36,6 +37,7 @@ class WorldMAR(pl.LightningModule):
     """
     def __init__(self, 
                  vae_config, # should be an AutoencoderKL 
+                 diffloss_config,
                  img_height=360, img_width=640,
                  encoder_embed_dim=512, encoder_depth=16, encoder_num_heads=16,
                  decoder_embed_dim=512, decoder_depth=16, decoder_num_heads=16,
@@ -51,7 +53,9 @@ class WorldMAR(pl.LightningModule):
         # initialize diff loss
         # TODO: make cutomizable as MLP (per patch?) vs DiT (per frame).
         #       for now, assuming more lightweight MLP
-        # self.diffloss = DiffLoss
+        self.diffloss = instantiate_from_config(diffloss_config)
+        assert isinstance(self.diffloss, SimpleMLPAdaLN)
+    
     
     def instantiate_vae(self, vae_config):
         self.vae = instantiate_from_config(vae_config)
