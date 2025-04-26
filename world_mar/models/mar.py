@@ -20,6 +20,7 @@ from timm.models.vision_transformer import Block
 # from models.diffloss import DiffLoss
 
 from world_mar.modules.utils import instantiate_from_config
+from world_mar.oasis_utils.vae import AutoencoderKL
 
 import pytorch_lightning as pl
 
@@ -30,7 +31,7 @@ class WorldMAR(pl.LightningModule):
         so we should be using it
     
     Req'd args... you need to give me a:
-        - vae: think that has an eVk
+        - vae: thing that has an encode and decode
 
     """
     def __init__(self, 
@@ -45,6 +46,7 @@ class WorldMAR(pl.LightningModule):
 
         # intialize the vae
         self.instantiate_vae(vae_config)
+        assert isinstance(self.vae, AutoencoderKL)
         
         # initialize diff loss
         # TODO: make cutomizable as MLP (per patch?) vs DiT (per frame).
