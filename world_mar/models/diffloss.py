@@ -7,9 +7,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 import math
 
-from diffusion import create_diffusion # TODO: add diffusion file?
-
-from world_mar.modules.utils import instantiate_from_config
+from diffusion import create_diffusion # TODO: add diffusion file
 
 class DiffLoss(nn.Module):
     """Diffusion Loss"""
