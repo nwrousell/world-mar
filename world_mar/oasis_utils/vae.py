@@ -12,9 +12,9 @@ import torch.nn.functional as F
 from einops import rearrange
 from timm.layers.mlp import Mlp
 from timm.layers.helpers import to_2tuple
-from oasis_utils.rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
-from dit import PatchEmbed
-
+from world_mar.oasis_utils.rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
+from world_mar.oasis_utils.dit import PatchEmbed
+from safetensors.torch import load_model
 
 class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False, dim=1):
@@ -160,6 +160,7 @@ class AutoencoderKL(nn.Module):
         mlp_ratio=4.0,
         norm_layer=functools.partial(nn.LayerNorm, eps=1e-6),
         use_variational=True,
+        load_from_ckpt=None,
         **kwargs,
     ):
         super().__init__()
@@ -220,7 +221,15 @@ class AutoencoderKL(nn.Module):
         self.predictor = nn.Linear(dec_dim, self.patch_dim)  # decoder to patch
 
         # initialize this weight first
-        self.initialize_weights()
+        if load_from_ckpt:
+            self.load_from_checkpoint(load_from_ckpt)
+        else:
+            self.initialize_weights()
+        
+    
+    def load_from_checkpoint(self, ckpt_path):
+        # making this so we can load oasis vae    
+        load_model(self, ckpt_path)
 
     def initialize_weights(self):
         # initialization

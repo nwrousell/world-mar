@@ -5,9 +5,9 @@ Adapted from: https://github.com/etched-ai/open-oasis/blob/master/dit.py
 from typing import Optional, Literal
 import torch
 from torch import nn
-from rotary_embedding_torch import RotaryEmbedding
+from world_mar.oasis_utils.rotary_embedding_torch import RotaryEmbedding
 from einops import rearrange
-from attention import SpatialAxialAttention, TemporalAxialAttention
+from world_mar.oasis_utils.attention import SpatialAxialAttention, TemporalAxialAttention
 from timm.models.vision_transformer import Mlp
 from timm.layers.helpers import to_2tuple
 import math

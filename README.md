@@ -17,6 +17,7 @@
 - [MARdini](https://arxiv.org/pdf/2410.20280)
 - [Oasis](https://oasis-model.github.io/)
 - [RoPE](https://arxiv.org/pdf/2104.09864)
+- [2D RoPE](https://arxiv.org/pdf/2403.13298)
 
 ## Dataset
 - VPT dataset collected by OpenAI contractors
