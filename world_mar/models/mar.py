@@ -82,13 +82,20 @@ class WorldMAR(pl.LightningModule):
         for param in self.vae.parameters():
             param.requires_grad=False
 
-    def forward(self, x):
+    def forward(self, context_frames, action, context_poses):
         # TODO: fill this out more detail
-        # 1) encode frame
-        x = self.vae.encode(...)
+        # 1) encode frames
+        context_latents = self.vae.encode(context_frames)
 
-        # 2) ma
-        x = self
+        # 2) encode actions and poses
+
+        # 3) add pose embeddings to latents
+
+        # 4)
+        z = ...
+
+        # 5) diffuse
+        
 
     def training_step(self, batch, batch_idx):
         # TODO: parse batch, whether dict or tuple

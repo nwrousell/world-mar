@@ -1,3 +1,0 @@
-model:
-  learning_rate: 8e-4 # from MAR for img gen paper
-  target: world_mar.models.mar.WorldMAR
