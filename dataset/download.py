@@ -17,9 +17,16 @@ import os
 import glob, os, cv2, json
 import random
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from tqdm import tqdm
+import shutil
 
 MAX_THREADS = 10
+
+frame_counter_lock = Lock()
+num_total_frames = 0
+demonstration_id_to_num_frames = {}
+
 
 parser = argparse.ArgumentParser(description="Download OpenAI contractor datasets")
 parser.add_argument("--json-file", type=str, required=True, help="Path to the index .json file")
@@ -48,7 +55,32 @@ def relpaths_to_download(relpaths, output_dir):
     print('total:', len(relpaths), '| exist:', len(non_defect), '| downloading:', len(diff_to_download))
     return diff_to_download
 
+def unroll_mp4_into_jpgs(mp4_path: str, output_folder: str, jpg_quality=95) -> int:
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Open the video file
+    cap = cv2.VideoCapture(mp4_path)
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video {mp4_path}")
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break  # End of video
+
+        frame_filename = os.path.join(output_folder, f"frame{frame_idx:06d}.jpg")
+        # Save frame as JPEG
+        cv2.imwrite(frame_filename, frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality])
+
+        frame_idx += 1
+
+    cap.release()
+    return frame_idx
+
 def download_video_and_action_files(basedir: str, relpath: str, pbar):
+    global num_total_frames
     url = basedir + relpath
     filename = os.path.basename(relpath)
     outpath = os.path.join(args.output_dir, filename)
@@ -69,27 +101,59 @@ def download_video_and_action_files(basedir: str, relpath: str, pbar):
         print(f"\tError downloading {jsonl_url}: {e}. Cleaning up mp4 and moving on")
         os.remove(outpath)
         return
-    pbar.update(1)
-    print(f"Finished downloading {outpath}")
+    
+    # unroll into folder of jpgs
+    folder_path = outpath.removesuffix(".mp4")
+    demo_id = os.path.basename(folder_path)
+    try:
+        num_frames = unroll_mp4_into_jpgs(outpath, folder_path)
+    except Exception as e:
+        shutil.rmtree(folder_path)
+        os.remove(jsonl_outpath)
+        os.remove(outpath)
+        return
+    
+    os.remove(outpath)
 
-def main(args):
-    with open(args.json_file, "r") as f:
+    # update count
+    with frame_counter_lock:
+        num_total_frames += num_frames
+        demonstration_id_to_num_frames[demo_id] = num_frames
+
+    pbar.update(1)
+    print(f"Finished downloading and unrolling {outpath}")
+
+def download_minecraft_data(json_file: str, num_demos: int, output_dir: str):
+    global num_total_frames
+    global demonstration_id_to_num_frames
+    num_total_frames = 0
+    demonstration_id_to_num_frames = {}
+    with open(json_file, "r") as f:
         data = f.read()
     data = eval(data)
     basedir = data["basedir"]
     relpaths = data["relpaths"]
     if args.num_demos is not None:
         # relpaths = relpaths[:args.num_demos]
-        relpaths = random.sample(relpaths, args.num_demos)
+        relpaths = random.sample(relpaths, num_demos)
 
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-    relpaths = relpaths_to_download(relpaths, args.output_dir)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    relpaths = relpaths_to_download(relpaths, output_dir)
     
     with ThreadPoolExecutor(MAX_THREADS) as executor:
         with tqdm(total=len(relpaths), desc="Downloading Files") as pbar:
             executor.map(lambda rp: download_video_and_action_files(basedir, rp, pbar), relpaths)
+    
+
+    print(f"total frames: {num_total_frames}")
+    counts_dict = { 
+        "total_frames": num_total_frames,
+        "demonstration_id_to_num_frames": demonstration_id_to_num_frames
+    }
+    with open(os.path.join(output_dir, "counts.json"), "wt") as f:
+        json.dump(counts_dict, f)
         
 if __name__ == "__main__":
     args = parser.parse_args()
-    main(args)
+    download_minecraft_data(args.json_file, args.num_demos, args.output_dir)
