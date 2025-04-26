@@ -1,8 +1,0 @@
-model:
-  learning_rate: 8e-4 # from MAR for img gen paper
-  target: apple_banana.world_mar.models.mar.WorldMAR
-  params:
-    vae_config:
-      target: ViT_L_20_Shallow_Encoder 
-      param:
-        load_from_ckpt: checkpoints/oasis/vit-l-20.safetensors
