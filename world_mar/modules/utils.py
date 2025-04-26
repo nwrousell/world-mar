@@ -1,6 +1,6 @@
 import importlib
 
-def instantiate_from_config(object, cfg):
+def instantiate_from_config(cfg):
     assert "target" in cfg, "this is horribly wrong"
 
     module, cls = cfg["target"].rsplit('.')
