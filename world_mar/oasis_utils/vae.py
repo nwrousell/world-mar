@@ -13,8 +13,7 @@ from einops import rearrange
 from timm.layers.mlp import Mlp
 from timm.layers.helpers import to_2tuple
 from oasis_utils.rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
-from dit import PatchEmbed
-
+from oasis_utils.dit import PatchEmbed
 
 class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False, dim=1):
@@ -221,6 +220,9 @@ class AutoencoderKL(nn.Module):
 
         # initialize this weight first
         self.initialize_weights()
+    
+    def load_from_checkpoint(ckpt_path):
+        
 
     def initialize_weights(self):
         # initialization
