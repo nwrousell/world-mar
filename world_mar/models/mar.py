@@ -78,6 +78,9 @@ class WorldMAR(pl.LightningModule):
         self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
         # TODO: embs for ctx, prev, action
 
+        # --- pose prediction ---
+        # TODO: add pose prediction network, throw into training
+
         self.initialize_weights()
         
         # --- initialize diff loss ---
@@ -99,7 +102,7 @@ class WorldMAR(pl.LightningModule):
         self.seq_h, self.seq_w = self.vae.seq_h // patch_size, self.vae.seq_w // patch_size
         self.frame_seq_len = self.seq_h, self.seq_w
         # we assume here the diffusion model operates one frame at a time:
-        self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.seq_len, decoder_embed_dim))
+        self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.frame_seq_len, decoder_embed_dim))
     
     def initialize_weights(self):
         torch.nn.init.normal_(self.mask_token, std=.02)
@@ -234,8 +237,10 @@ class WorldMAR(pl.LightningModule):
         idx = idx.unsqueeze(-1).expand(-1,-1,z.shape[-1])
         z_t = torch.gather(z, dim=1, index=idx) 
         xt_gt = torch.gather(x_gt, dim=1, index=idx)
+        # WARNING: THIS IS BAD IF WE ARE DOING DIFF FRAME PRED!!!!
+        mask_t = mask[:,:self.frame_seq_len]
 
-        loss = self.forward_diffusion(z_t, xt_gt, mask)        
+        loss = self.forward_diffusion(z_t, xt_gt, mask_t)        
 
         return loss
 
