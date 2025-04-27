@@ -69,7 +69,7 @@ class WorldMAR(pl.LightningModule):
 
         # --- decoder ---
         self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
-        self.mask_token = nn.Parameter(torch.zeros(1,1, decoder_embed_dim))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
         
         # --- initialize diff loss ---
         # TODO: make cutomizable as MLP (per patch?) vs DiT (per frame).
