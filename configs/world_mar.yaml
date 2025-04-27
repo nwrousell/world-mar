@@ -6,12 +6,3 @@ model:
       target: world_mar.oasis_utils.vae.ViT_L_20_Shallow_Encoder 
       params:
         load_from_ckpt: checkpoints/oasis/vit-l-20.safetensors
-    
-    diffloss_config:
-      target: world_mar.models.diffloss.SimpleMLPAdaLN
-      params:
-        in_channels: 256
-        model_channels: 1024
-        out_channels: 512
-        z_channels: 256
-        num_res_blocks: 4
