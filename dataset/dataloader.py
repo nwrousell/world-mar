@@ -216,13 +216,15 @@ class MinecraftDataset(Dataset):
                 step_data["mouse"]["buttons"] = [button for button in step_data["mouse"]["buttons"] if button != 0]
 
             action, is_null_action = json_action_to_env_action(step_data)
-            action_vectors.append(env_action_to_vector(action))
 
             # Update hotbar selection
             current_hotbar = step_data["hotbar"]
             if current_hotbar != last_hotbar:
                 action["hotbar.{}".format(current_hotbar + 1)] = 1
             last_hotbar = current_hotbar
+
+            action_vectors.append(env_action_to_vector(action))
+
 
             pose_vector = np.array([step_data["xpos"], step_data["ypos"], step_data["zpos"], step_data["pitch"], step_data["yaw"]])
             pose_vectors.append(pose_vector)
@@ -278,7 +280,7 @@ class MinecraftDataset(Dataset):
             composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
 
         # sample K context frames using monte-carlo overlap
-        context_indices = [1, 2, 3]
+        context_indices = ...
         context_frames = []
         for context_i in context_indices:
             context_frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")

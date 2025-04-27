@@ -117,7 +117,7 @@ def is_inside_fovs_3d(points, centers, center_pitches, center_yaws, fov_half_h, 
     # Check if both horizontal and vertical angles are within their respective FOV limits
     return (diff_azimuth < fov_half_h) & (diff_elevation < fov_half_v)
 
-def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.3, k=3):
+def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.3, k=3, do_optim=False):
     """
     Returns the indices of up to k other_poses that have the most overlap with target_pose
 
@@ -142,7 +142,9 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
         fov_half_v
     )
 
-    
+    if do_optim:
+        points = points[in_fov1]
+        in_fov1 = in_fov1[in_fov1]
 
     in_fov_list = torch.stack([
         is_inside_fov_3d_hv(points, pc[:3], pc[-2], pc[-1], fov_half_h, fov_half_v)
@@ -151,6 +153,9 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
 
     top_k = []
     for _ in range(k):
+        if in_fov1.sum() < 5:
+            break
+
         overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
         print(overlap_ratio.shape, overlap_ratio[-5:])
 
@@ -164,8 +169,7 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
 
         # choice 1: directly remove overlapping region
         # occupied_mask = in_fov_list[r_idx[0, range(in_fov1.shape[-1])], :, range(in_fov1.shape[-1])].permute(1,0)
-        # occupied_mask = in_fov_list[r_idx[0]] & in_fov1
-        in_fov1 = in_fov1 & ~occupied_mask
+        in_fov1 = in_fov1 & ~in_fov_list[r_idx[0]]
 
         # choice 2: apply similarity filter 
         # cos_sim = F.cosine_similarity(xs_pred.to(r_idx.device)[r_idx[:, range(in_fov1.shape[1])], 
@@ -208,7 +212,7 @@ if __name__ == "__main__":
 
     pose_conditions = list(map(lambda s: torch.tensor([s["xpos"], s["ypos"], s["zpos"], s["pitch"], s["yaw"]]), metadata))
     pose_conditions = torch.stack(pose_conditions)
-    pose_conditions, target_pose = pose_conditions[-1001:-1], pose_conditions[-1]
+    pose_conditions, target_pose = pose_conditions[-1001:-5], pose_conditions[-5]
     print(pose_conditions.shape, pose_conditions[:5])
 
     # pose_conditions = torch.ransd((1000, 5)) # slow scales linearly with this
@@ -219,6 +223,12 @@ if __name__ == "__main__":
     relevant_indices = get_most_relevant_poses_to_target(target_pose, pose_conditions, points)
     end = time()
     print(f"slow time: {end - start}")
+    print(relevant_indices)
+
+    start = time()
+    relevant_indices = get_most_relevant_poses_to_target(target_pose, pose_conditions, points, do_optim=True)
+    end = time()
+    print(f"fast time: {end - start}")
     print(relevant_indices)
 
     # print(overlap1.shape, overlap1[:5])
