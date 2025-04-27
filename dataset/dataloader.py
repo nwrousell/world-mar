@@ -1,9 +1,6 @@
-# From https://github.com/openai/Video-Pre-Training/blob/main/data_loader.py, with some adjustments
+# Snippets from https://github.com/openai/Video-Pre-Training/blob/main/data_loader.py
 
-# Code for loading OpenAI MineRL VPT datasets
-# NOTE: This is NOT original code used for the VPT experiments!
-#       (But contains all [or at least most] steps done in the original data loading)
-
+from typing import Tuple
 import json
 import glob
 import os
@@ -12,7 +9,8 @@ from multiprocessing import Process, Queue, Event
 
 import numpy as np
 import cv2
-
+import lightning as L
+from torch.utils.data import DataLoader, Dataset
 QUEUE_TIMEOUT = 10
 
 CURSOR_FILE = os.path.join(os.path.dirname(__file__), "cursors", "mouse_cursor_white_16x16.png")
@@ -82,12 +80,6 @@ NOOP_ACTION = {
     "pickItem": 0,
 }
 
-MESSAGE = """
-This script will take a video, predict actions for its frames and
-and show them with a cv2 window.
-
-Press any button in the window to proceed to the next frame.
-"""
 
 # Matches a number in the MineRL Java code regarding sensitivity
 # This is for mapping from recorded sensitivity to the one used in the model
@@ -145,6 +137,18 @@ def json_action_to_env_action(json_action):
 
     return env_action, is_null_action
 
+def env_action_to_vector(action):
+    keys = NOOP_ACTION.keys()
+    
+    vector = []
+    for key in keys:
+        if key == 'camera':
+            vector.extend(action[key])  # extend with both pitch and yaw
+        else:
+            vector.append(action[key])
+    
+    return np.array(vector, dtype=np.float32)
+
 def composite_images_with_alpha(image1, image2, alpha, x, y):
     """
     Draw image2 over image1 at location x,y, using alpha as the opacity for image2.
@@ -158,48 +162,47 @@ def composite_images_with_alpha(image1, image2, alpha, x, y):
     alpha = alpha[:ch, :cw]
     image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha).astype(np.uint8)
 
+class MinecraftDataset(Dataset):
+    def __init__(self, dataset_dir):
+        self.dataset_dir = dataset_dir
+        unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
+        unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
+        self.unique_ids = sorted(unique_ids)
 
-def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
-    """
-    Worker for the data loader.
-    """
-    cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
-    # Assume 16x16
-    cursor_image = cursor_image[:16, :16, :]
-    cursor_alpha = cursor_image[:, :, 3:] / 255.0
-    cursor_image = cursor_image[:, :, :3]
+        # read counts metadata
+        with open(os.path.join(dataset_dir, "counts.json"), "rt") as f:
+            counts_dict = json.load(f)
+        self.total_frames = counts_dict["total_frames"]
+        self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
 
-    while True:
-        task = tasks_queue.get()
-        if task is None:
-            break
-        trajectory_id, video_path, json_path = task
-        video = cv2.VideoCapture(video_path)
-        # NOTE: In some recordings, the game seems to start
-        #       with attack always down from the beginning, which
-        #       is stuck down until player actually presses attack
-        # NOTE: It is uncertain if this was the issue with the original code.
-        attack_is_stuck = False
-        # Scrollwheel is allowed way to change items, but this is
-        # not captured by the recorder.
-        # Work around this by keeping track of selected hotbar item
-        # and updating "hotbar.#" actions when hotbar selection changes.
-        # NOTE: It is uncertain is this was/is an issue with the contractor data
+        # construct demo_id -> start_frame map
+        self.demo_to_start_frame = dict()
+        self.demo_to_metadata = {}
+        current_frame = 0
+        for demo_id in self.unique_ids:
+            self.demo_to_start_frame[demo_id] = current_frame
+            current_frame += self.demo_to_num_frames[demo_id]
+
+            # load all actions/poses into memory now and preprocess
+            self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
+
+
+        self.cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
+        self.cursor_image = self.cursor_image[:16, :16, :] # Assume 16x16
+        self.cursor_alpha = self.cursor_image[:, :, 3:] / 255.0
+        self.cursor_image = self.cursor_image[:, :, :3]
+
+    def _preprocess_demo_metadata(self, demo_id):
+        with open(os.path.join(self.dataset_dir, f"{demo_id}.jsonl"), "rt") as f:
+            raw_metadata = json.loads("[" + ",".join(f.readlines()) + "]")
+        
+        action_vectors = []
+        pose_vectors = []
+        is_gui_open = []
+        mouse_pos = []
         last_hotbar = 0
-
-        with open(json_path) as json_file:
-            try:
-                json_lines = json_file.readlines()
-                json_data = "[" + ",".join(json_lines) + "]"
-                json_data = json.loads(json_data)
-            except:
-                print(f"error decoding json data at {json_path}, skipping...")
-                continue
-        for i in range(len(json_data)):
-            if quit_workers_event.is_set():
-                break
-            step_data = json_data[i]
-
+        attack_is_stuck = False
+        for i, step_data in enumerate(raw_metadata):
             if i == 0:
                 # Check if attack will be stuck down
                 if step_data["mouse"]["newButtons"] == [0]:
@@ -213,6 +216,7 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
                 step_data["mouse"]["buttons"] = [button for button in step_data["mouse"]["buttons"] if button != 0]
 
             action, is_null_action = json_action_to_env_action(step_data)
+            action_vectors.append(env_action_to_vector(action))
 
             # Update hotbar selection
             current_hotbar = step_data["hotbar"]
@@ -220,167 +224,89 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
                 action["hotbar.{}".format(current_hotbar + 1)] = 1
             last_hotbar = current_hotbar
 
-            # Read frame even if this is null so we progress forward
-            ret, frame = video.read()
-            if ret:
-                # Skip null actions as done in the VPT paper
-                # NOTE: in VPT paper, this was checked _after_ transforming into agent's action-space.
-                #       We do this here as well to reduce amount of data sent over.
-                if is_null_action:
-                    continue
-                if step_data["isGuiOpen"]:
-                    camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
-                    cursor_x = int(step_data["mouse"]["x"] * camera_scaling_factor)
-                    cursor_y = int(step_data["mouse"]["y"] * camera_scaling_factor)
-                    composite_images_with_alpha(frame, cursor_image, cursor_alpha, cursor_x, cursor_y)
-                cv2.cvtColor(frame, code=cv2.COLOR_BGR2RGB, dst=frame)
-                frame = np.asarray(np.clip(frame, 0, 255), dtype=np.uint8)
-                frame = resize_image(frame, AGENT_RESOLUTION)
-                output_queue.put((trajectory_id, frame, action), timeout=QUEUE_TIMEOUT)
-            else:
-                print(f"Could not read frame from video {video_path}")
-        video.release()
-        if quit_workers_event.is_set():
-            break
-    # Tell that we ended
-    output_queue.put(None)
+            pose_vector = np.array([step_data["xpos"], step_data["ypos"], step_data["zpos"], step_data["pitch"], step_data["yaw"]])
+            pose_vectors.append(pose_vector)
 
-class DataLoader:
-    """
-    Generator class for loading batches from a dataset
+            is_gui_open.append(step_data["isGuiOpen"])
+            mouse_pos.append(step_data["mouse"])
 
-    This only returns a single step at a time per worker; no sub-sequences.
-    Idea is that you keep track of the model's hidden state and feed that in,
-    along with one sample at a time.
 
-    + Simpler loader code
-    + Supports lower end hardware
-    - Not very efficient (could be faster)
-    - No support for sub-sequences
-    - Loads up individual files as trajectory files (i.e. if a trajectory is split into multiple files,
-      this code will load it up as a separate item).
-    """
-    def __init__(self, dataset_dir, n_workers=8, batch_size=8, n_epochs=1, max_queue_size=16):
-        assert n_workers >= batch_size, "Number of workers must be equal or greater than batch size"
-        self.dataset_dir = dataset_dir
-        self.n_workers = n_workers
-        self.n_epochs = n_epochs
-        self.batch_size = batch_size
-        self.max_queue_size = max_queue_size
-        unique_ids = glob.glob(os.path.join(dataset_dir, "*.mp4"))
-        unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
-        self.unique_ids = unique_ids
-        # Create tuples of (video_path, json_path) for each unique_id
-        demonstration_tuples = []
-        for unique_id in unique_ids:
-            video_path = os.path.abspath(os.path.join(dataset_dir, unique_id + ".mp4"))
-            json_path = os.path.abspath(os.path.join(dataset_dir, unique_id + ".jsonl"))
-            demonstration_tuples.append((video_path, json_path))
+        action_matrix = np.stack(action_vectors, axis=0)
+        pose_matrix = np.stack(pose_vectors, axis=0)
 
-        assert n_workers <= len(demonstration_tuples), f"n_workers should be less than or equal to the number of demonstrations {len(demonstration_tuples)}"
-
-        # Repeat dataset for n_epochs times, shuffling the order for
-        # each epoch
-        self.demonstration_tuples = []
-        for i in range(n_epochs):
-            random.shuffle(demonstration_tuples)
-            self.demonstration_tuples += demonstration_tuples
-
-        self.task_queue = Queue()
-        self.n_steps_processed = 0
-        for trajectory_id, task in enumerate(self.demonstration_tuples):
-            self.task_queue.put((trajectory_id, *task))
-        for _ in range(n_workers):
-            self.task_queue.put(None)
-
-        self.output_queues = [Queue(maxsize=max_queue_size) for _ in range(n_workers)]
-        self.quit_workers_event = Event()
-        self.processes = [
-            Process(
-                target=data_loader_worker,
-                args=(
-                    self.task_queue,
-                    output_queue,
-                    self.quit_workers_event,
-                ),
-                daemon=True
-            )
-            for output_queue in self.output_queues
-        ]
-        for process in self.processes:
-            process.start()
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        batch_frames = []
-        batch_actions = []
-        batch_episode_id = []
-
-        for i in range(self.batch_size):
-            workitem = self.output_queues[self.n_steps_processed % self.n_workers].get(timeout=QUEUE_TIMEOUT)
-            if workitem is None:
-                # Stop iteration when first worker runs out of work to do.
-                # Yes, this has a chance of cutting out a lot of the work,
-                # but this ensures batches will remain diverse, instead
-                # of having bad ones in the end where potentially
-                # one worker outputs all samples to the same batch.
-                raise StopIteration()
-            trajectory_id, frame, action = workitem
-            batch_frames.append(frame)
-            batch_actions.append(action)
-            batch_episode_id.append(trajectory_id)
-            self.n_steps_processed += 1
-        return batch_frames, batch_actions, batch_episode_id
-
-    def __del__(self):
-        for process in self.processes:
-            process.terminate()
-            process.join()
-
-def subsequence_wrapper(loader: DataLoader, subseq_len: int):
-    """
-    Wraps the DataLoader iterator to add support for subsequences in a quick and dirty way
+        return { "action_matrix": action_vectors, "pose_matrix": pose_matrix, "is_gui_open": is_gui_open, "mouse_pos": mouse_pos }
     
-    Consumes from loader, adds to internal queue and yields batches of subsequences when large enough.
-    When one of the episodes being consumed in the batch changes, clears queue to ensure all 
-    subsequences are from the same trajectory
+    def _idx_to_demo_and_frame(self, idx) -> Tuple[str, int]:
+        for demo_id, start_frame in self.demo_to_start_frame.items():
+            n_frames = self.demo_to_num_frames[demo_id] - 1 # can sample n-1 frames
+            if idx >= start_frame and idx < start_frame + n_frames:
+                return demo_id, idx - start_frame + 1 # we can't sample first frames so add 1
+        
+        raise Exception("out of bounds")
 
-    This works because the data_loader_workers load one trajectory at a time and keep yielding frames from it.
+    def __len__(self) -> int:
+        return self.total_frames - len(self.demo_to_metadata.keys()) # we can't sample first frames cause we won't have context
 
-    NOTE: if trajectories are short and the subseq_len is long, this could result in clearing the queue before building up
-    enough samples to yield a subsequence, resulting in lost data
-    """
-    current_ep_ids, frames, actions = None, [], []
-    while True:
-        try:
-            next_frame, next_action, next_ep_ids = next(loader)
-        except StopIteration:
-            return
+    def __getitem__(self, idx):
+        demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
 
-        if current_ep_ids == next_ep_ids:
-            frames.append(next_frame)
-            actions.append(next_action)
-            if len(frames) < subseq_len:
-                continue
-            elif len(frames) == subseq_len:
-                yield frames, actions, current_ep_ids
-            elif len(frames) == subseq_len + 1:
-                frames.pop(0)
-                actions.pop(0)
-                yield frames, actions, current_ep_ids
-            else:
-                raise Exception("len of frames/actions is > subseq_len + 1 (shouldn't be possible)")
-        else:
-            if len(frames) < subseq_len:
-                print("clearing queue before saturated queue --> losing data :(")
-            current_ep_ids = next_ep_ids
-            frames = [next_frame]
-            actions = [next_action]
+        assert frame_idx > 0
+
+        # get target frame and trajectory metadata
+        frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
+        frame = cv2.imread(frame_path)
+
+        action_matrix, pose_matrix, is_gui_open, mouse_pos = (
+            self.demo_to_metadata[demo_id]["action_matrix"], 
+            self.demo_to_metadata[demo_id]["pose_matrix"],
+            self.demo_to_metadata[demo_id]["is_gui_open"],
+            self.demo_to_metadata[demo_id]["mouse_pos"],
+        )
+
+        action, target_frame_pose = action_matrix[frame_idx-1], pose_matrix[frame_idx]
+
+        # convert poses to relative
+        relative_pose_matrix = pose_matrix.copy()[:frame_idx] - pose_matrix[frame_idx]
+        relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] > np.pi] -= 2 * np.pi
+        relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] < -np.pi] += 2 * np.pi
+
+        # compose with cursor
+        if is_gui_open[frame_idx]:
+            camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
+            cursor_x = int(mouse_pos[frame_idx]["x"] * camera_scaling_factor)
+            cursor_y = int(mouse_pos[frame_idx]["y"] * camera_scaling_factor)
+            composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
+
+        # sample K context frames using monte-carlo overlap
+        context_indices = [1, 2, 3]
+        context_frames = []
+        for context_i in context_indices:
+            context_frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
+            context_frames.append(cv2.imread(context_frame_path))
+        context_relative_poses = relative_pose_matrix[context_indices]
+
+        context_frames = np.stack(context_frames, axis=0)
+
+        return frame, context_frames, context_relative_poses, action
+
+class MinecraftDataModule(L.LightningDataModule):
+    def __init__(self, dataset_dir: str, index_path: str):
+        super().__init__()
+        self.dataset_dir = dataset_dir
+        self.index_path = index_path
+        self.dataset = MinecraftDataset(dataset_dir=dataset_dir)
+    
+    def train_dataloader(self, batch_size):
+        return DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
+    
+    def val_dataloader(self, batch_size):
+        return DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
 
 
 if __name__ == "__main__":
-    dataloader = DataLoader(dataset_dir="../data", n_workers=2, batch_size=1)
-    batch = next(dataloader)
-    np.save("224.npy", batch[0][0])
+    dataset = MinecraftDataset(dataset_dir="../data")
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+    print(len(dataloader))
+    batch = next(iter(dataloader))
+    for item in batch:
+        print(item.shape)
