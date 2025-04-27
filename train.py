@@ -79,6 +79,7 @@ def main(args):
         num_devices = 1
         accelerator = "cpu"
 
+    # TODO: add logger
     trainer = pl.Trainer(
         accelerator=accelerator, devices=num_devices, precision="bf16-mixed",
         callbacks=callbacks
