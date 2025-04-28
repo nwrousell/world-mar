@@ -198,7 +198,20 @@ class WorldMAR(pl.LightningModule):
         return mask, offsets # b hw, b
 
     def add_token_buffers(self, x):
-        ... #TODO
+        B, T, H, W, D = x.shape
+        # tokens: expected to be d-dimensional vectors
+        pred_token_buffer = self.pred_token.view(1, 1, 1, 1, D).repeat(B, 1, H, W, 1)
+        prev_token_buffer = self.prev_token.view(1, 1, 1, 1, D).repeat(B, 1, H, W, 1)
+        ctx_token_buffer = self.ctx_token.view(1, 1, 1, 1, D).repeat(B, T-2, H, W, 1)
+        # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim) 
+        # concat [PREV] token buffer to x[:, 1] (second elements along temporal dim)
+        # concat [CTX] token buffer to x[:, 2:] (third, fourth, fifth, ... elements along temporal dim)
+        x = torch.cat([
+            torch.cat([x[:, 0:1], pred_token_buffer], dim=-3),
+            torch.cat([x[:, 1:2], prev_token_buffer], dim=-3),
+            torch.cat([x[:, 2:], ctx_token_buffer], dim=-3)
+        ], dim=-4)
+        return x
 
     def forward_encoder(self, x, actions, poses, mask, s_attn_mask=None, t_attn_mask=None):
         # x : expected to be b t h w d
