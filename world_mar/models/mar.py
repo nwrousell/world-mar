@@ -223,7 +223,7 @@ class WorldMAR(pl.LightningModule):
         ], dim=-4)  # dim=-3 is H and dim=-4 is T
         return x
 
-    def forward_encoder(self, x, actions, poses, mask, s_attn_mask=None, t_attn_mask=None):
+    def forward_encoder(self, x, actions, poses, s_attn_mask=None, t_attn_mask=None):
         # x:       (B, T, H, W, token_embed_dim)
         # actions: (B, 25)
         # poses:   (B, T, 40H, 40W, 6)
