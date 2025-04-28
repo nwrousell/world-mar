@@ -2,9 +2,8 @@
 Adapted from: https://github.com/LTH14/mar/blob/main/models/mar.py
 """
 
-
+from world_mar.modules.embeddings.rotary_embedding import RotaryEmbedding
 from functools import partial
-
 import numpy as np
 from tqdm import tqdm
 import scipy.stats as stats
@@ -15,15 +14,10 @@ from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
 from einops import rearrange
-
 from world_mar.modules.attention import STBlock
-
-# from models.diffloss import DiffLoss
-
 from world_mar.modules.utils import instantiate_from_config
 from world_mar.oasis_utils.vae import AutoencoderKL
 from world_mar.models.diffloss import DiffLoss
-
 import pytorch_lightning as pl
 
 
@@ -41,6 +35,7 @@ class WorldMAR(pl.LightningModule):
                  vae_config, # should be an AutoencoderKL 
                  img_height=360, img_width=640, num_frames=5,
                  patch_size=2, token_embed_dim=16,
+                 vae_seq_h=32, vae_seq_w=18,
                  encoder_embed_dim=512, encoder_depth=16, encoder_num_heads=16,
                  decoder_embed_dim=512, decoder_depth=16, decoder_num_heads=16,
                  diffloss_w=512, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
@@ -53,40 +48,59 @@ class WorldMAR(pl.LightningModule):
         super().__init__()
         self.automatic_optimization = False
 
-        # --- masking statistics ---
+        # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
         self.mask_ratio_gen = stats.truncnorm((mask_ratio_min -1.0) / 0.25, 0, loc=1.0, scale=0.25)
 
-        # --- create rope for enc and dec --- TODO
-
-
-        # --- encoder ---
+        # ----- Encoder -----
+        # initial projection
         self.token_embed_dim = token_embed_dim * patch_size**2
         self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True) # projs VAE latents to transformer dim
         self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
+        # special tokens [PRED], [PREV], and [CTX]
+        self.pred_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
+        self.prev_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
+        self.ctx_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
+        # RoPE rotary embeddings for encoder blocks along spatial and temporal dimensions
+        self.enc_spatial_rotary_emb = RotaryEmbedding(dim=encoder_embed_dim // encoder_num_heads // 2, freqs_for="pixel", max_freq=256)
+        self.enc_temporal_rotary_emb = RotaryEmbedding(dim=encoder_embed_dim // encoder_num_heads)
+        # encoder spatio-temporal attention blocks
         self.encoder_blocks = nn.ModuleList([
-            STBlock(encoder_embed_dim, encoder_num_heads, qkv_bias=True,
-                    proj_drop=proj_dropout, attn_drop=attn_dropout,
-                    spatial_rotary_emb=..., temporal_rotary_emb=...) for _ in range(encoder_depth)])
+            STBlock(
+                encoder_embed_dim, encoder_num_heads, qkv_bias=True,
+                proj_drop=proj_dropout, attn_drop=attn_dropout,
+                spatial_rotary_emb=self.enc_spatial_rotary_emb,
+                temporal_rotary_emb=self.enc_temporal_rotary_emb
+            ) for _ in range(encoder_depth)])
+        # layer normalization
         self.encoder_norm = nn.LayerNorm(encoder_embed_dim)
-        # TODO: embs for ctx, prev, action
 
-        # --- decoder ---
+        # ----- Decoder -----
+        # initial projection
         self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, 1, decoder_embed_dim))
+        # special token [MASK] for selected tokens that decoder should in-paint
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+        # RoPE rotary embeddings for encoder blocks along spatial and temporal dimensions
+        self.dec_spatial_rotary_emb = RotaryEmbedding(dim=decoder_embed_dim // decoder_num_heads // 2, freqs_for="pixel", max_freq=256)
+        self.dec_temporal_rotary_emb = RotaryEmbedding(dim=decoder_embed_dim // decoder_num_heads)
+        # decoder spatio-temporal attention blocks
         self.decoder_blocks = nn.ModuleList([
-            STBlock(decoder_embed_dim, decoder_num_heads, qkv_bias=True,
-                    proj_drop=proj_dropout, attn_drop=attn_dropout, 
-                    spatial_rotary_emb=..., temporal_rotary_emb=...) for _ in range(decoder_depth)])
+            STBlock(
+                decoder_embed_dim, decoder_num_heads, qkv_bias=True,
+                proj_drop=proj_dropout, attn_drop=attn_dropout, 
+                spatial_rotary_emb=self.dec_spatial_rotary_emb, 
+                temporal_rotary_emb=self.dec_temporal_rotary_emb
+            ) for _ in range(decoder_depth)])
+        # layer normalization
         self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
-        # TODO: embs for ctx, prev, action
 
-        # --- pose prediction ---
+        # ----- pose prediction -----
         # TODO: add pose prediction network, throw into training
 
+        # ----- special token initialization -----
         self.initialize_weights()
         
-        # --- initialize diff loss ---
+        # ----- initialize diff loss -----
         # TODO: make cutomizable as MLP (per patch?) vs DiT (per frame).
         #       for now, assuming more lightweight MLP
         self.diffloss = DiffLoss(
@@ -98,10 +112,12 @@ class WorldMAR(pl.LightningModule):
         )
         self.diffusion_batch_mul = diffusion_batch_mul
 
-        # --- intialize the vae ---
+        # ----- intialize the vae -----
         self.instantiate_vae(vae_config)
         assert isinstance(self.vae, AutoencoderKL)
         assert self.vae.latent_dim == token_embed_dim
+        assert self.vae.seq_h == vae_seq_h && self.vae.seq_w == vae_seq_w
+
         self.seq_h, self.seq_w = self.vae.seq_h // patch_size, self.vae.seq_w // patch_size
         self.frame_seq_len = self.seq_h, self.seq_w
         # we assume here the diffusion model operates one frame at a time:
@@ -109,6 +125,9 @@ class WorldMAR(pl.LightningModule):
         self.num_frames = num_frames
     
     def initialize_weights(self):
+        torch.nn.init.normal_(self.pred_token, std=.02)
+        torch.nn.init.normal_(self.prev_token, std=.02)
+        torch.nn.init.normal_(self.ctx_token, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
         torch.nn.init.normal_(self.diffusion_pos_emb_learned, std=.02)
 
@@ -175,7 +194,10 @@ class WorldMAR(pl.LightningModule):
                              src=torch.ones(bsz, self.frame_seq_len, device=x.device))
         return mask, offsets # b hw, b
 
-    def forward_encoder(self, x, actions, poses, s_attn_mask=None, t_attn_mask=None):
+    def add_token_buffers(self, x):
+        ... #TODO
+
+    def forward_encoder(self, x, actions, poses, mask, s_attn_mask=None, t_attn_mask=None):
         # x : expected to be b t h w d
         # TODO: double check this actually does across last dim
         x = self.z_proj(x)
