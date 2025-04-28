@@ -116,7 +116,7 @@ class WorldMAR(pl.LightningModule):
         self.instantiate_vae(vae_config)
         assert isinstance(self.vae, AutoencoderKL)
         assert self.vae.latent_dim == token_embed_dim
-        assert self.vae.seq_h == vae_seq_h && self.vae.seq_w == vae_seq_w
+        assert self.vae.seq_h == vae_seq_h & self.vae.seq_w == vae_seq_w
 
         self.seq_h, self.seq_w = self.vae.seq_h // patch_size, self.vae.seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
