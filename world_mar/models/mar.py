@@ -190,7 +190,7 @@ class WorldMAR(pl.LightningModule):
         # TODO: consider moving this offset to any frame?
         #       this is 0 currently because pred frame is at start of seq
         if random_offset:
-            offsets = torch.randint(high=self.num_frames, size=bsz)
+            offsets = torch.randint(high=self.num_frames, size=bsz, device=self.device)
         else:
             offsets = torch.zeros(bsz, device=x.device)
         mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
