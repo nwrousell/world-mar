@@ -4,14 +4,16 @@ from typing import Tuple
 import json
 import glob
 import os
+from time import time
 import random
 from multiprocessing import Process, Queue, Event
 
-from ..modules.pose_retrieval import get_most_relevant_poses_to_target
+from ..modules.pose_retrieval import get_most_relevant_poses_to_target, get_relative_pose, euler_to_camera_to_world_matrix, convert_to_plucker, generate_points_in_sphere
 
 import numpy as np
 import cv2
 import lightning as L
+import torch
 from torch.utils.data import DataLoader, Dataset
 QUEUE_TIMEOUT = 10
 
@@ -149,7 +151,7 @@ def env_action_to_vector(action):
         else:
             vector.append(action[key])
     
-    return np.array(vector, dtype=np.float32)
+    return torch.tensor(vector, dtype=torch.float32)
 
 def composite_images_with_alpha(image1, image2, alpha, x, y):
     """
@@ -162,11 +164,15 @@ def composite_images_with_alpha(image1, image2, alpha, x, y):
     if ch == 0 or cw == 0:
         return
     alpha = alpha[:ch, :cw]
-    image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha).astype(np.uint8)
+    image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha)
 
 class MinecraftDataset(Dataset):
-    def __init__(self, dataset_dir):
+    def __init__(self, dataset_dir, memory_frames=500, num_context_frames=5):
         self.dataset_dir = dataset_dir
+        self.memory_frames = memory_frames
+        self.num_context_frames = num_context_frames
+
+        # determine demonstration ids
         unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
         unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
         self.unique_ids = sorted(unique_ids)
@@ -188,11 +194,14 @@ class MinecraftDataset(Dataset):
             # load all actions/poses into memory now and preprocess
             self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
 
-
+        # prepare cursor image
         self.cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
         self.cursor_image = self.cursor_image[:16, :16, :] # Assume 16x16
         self.cursor_alpha = self.cursor_image[:, :, 3:] / 255.0
         self.cursor_image = self.cursor_image[:, :, :3]
+
+        # generate points for monte-carlo memory retrieval
+        self.points = generate_points_in_sphere(n_points=10_000, radius=30)
 
     def _preprocess_demo_metadata(self, demo_id):
         with open(os.path.join(self.dataset_dir, f"{demo_id}.jsonl"), "rt") as f:
@@ -227,15 +236,15 @@ class MinecraftDataset(Dataset):
 
             action_vectors.append(env_action_to_vector(action))
 
-            pose_vector = np.array([step_data["xpos"], step_data["ypos"], step_data["zpos"], step_data["pitch"], step_data["yaw"]])
+            pose_vector = torch.tensor([step_data["xpos"], step_data["ypos"], step_data["zpos"], step_data["pitch"], step_data["yaw"]])
             pose_vectors.append(pose_vector)
 
             is_gui_open.append(step_data["isGuiOpen"])
             mouse_pos.append(step_data["mouse"])
 
 
-        action_matrix = np.stack(action_vectors, axis=0)
-        pose_matrix = np.stack(pose_vectors, axis=0)
+        action_matrix = torch.stack(action_vectors, axis=0)
+        pose_matrix = torch.stack(pose_vectors, axis=0)
 
         return { "action_matrix": action_matrix, "pose_matrix": pose_matrix, "is_gui_open": is_gui_open, "mouse_pos": mouse_pos }
     
@@ -253,11 +262,7 @@ class MinecraftDataset(Dataset):
     def __getitem__(self, idx):
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
 
-        assert frame_idx > 0
-
-        # get target frame and trajectory metadata
-        frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
-        frame = cv2.imread(frame_path)
+        assert frame_idx > 0        
 
         action_matrix, pose_matrix, is_gui_open, mouse_pos = (
             self.demo_to_metadata[demo_id]["action_matrix"], 
@@ -266,40 +271,69 @@ class MinecraftDataset(Dataset):
             self.demo_to_metadata[demo_id]["mouse_pos"],
         )
 
-        action, target_frame_pose = action_matrix[frame_idx-1], pose_matrix[frame_idx]
-
-        # convert poses to relative
-        relative_pose_matrix = pose_matrix.copy()[:frame_idx] - pose_matrix[frame_idx]
-        # relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] > np.pi] -= 2 * np.pi
-        # relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] < -np.pi] += 2 * np.pi
-        context_indices = get_most_relevant_poses_to_target()
-
+        action, target_pose = action_matrix[frame_idx-1], pose_matrix[frame_idx]
 
         # sample K context frames using monte-carlo overlap
-        context_frames = []
-        for context_i in context_indices:
-            context_frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
-            context_frames.append(cv2.imread(context_frame_path))
-        context_relative_poses = relative_pose_matrix[context_indices]
+        start_memory_idx = max(0, frame_idx-self.memory_frames)
+        context_indices = get_most_relevant_poses_to_target(
+            target_pose=target_pose, 
+            other_poses=pose_matrix[start_memory_idx:frame_idx], 
+            points=self.points, 
+            min_overlap=0.1, 
+            k=self.num_context_frames
+        )
+        context_indices = [i + max(0, frame_idx-self.memory_frames) for i in context_indices]  # convert back to trajectory indices
 
+        frame_indices = torch.tensor([frame_idx] + context_indices)
 
-        # compose with cursor
-        if is_gui_open[frame_idx]:
-            camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
-            cursor_x = int(mouse_pos[frame_idx]["x"] * camera_scaling_factor)
-            cursor_y = int(mouse_pos[frame_idx]["y"] * camera_scaling_factor)
-            composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
+        # convert poses to plucker
+        absolute_camera_to_world_matrices = euler_to_camera_to_world_matrix(pose_matrix[frame_indices])
+        plucker = convert_to_plucker(poses=absolute_camera_to_world_matrices, curr_frame=0).squeeze()
 
-        context_frames = np.stack(context_frames, axis=0)
+        # read frames from disk
+        frames = []
+        for frame_i in frame_indices:
+            frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
+            frame = torch.tensor(cv2.imread(frame_path))
+            frame = frame[..., [2, 1, 0]] # BGR --> RGB
 
-        return frame, context_frames, context_relative_poses, action
+            # draw cursor on frame if GUI is open
+            if is_gui_open[frame_i]:
+                camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
+                cursor_x = int(mouse_pos[frame_i]["x"] * camera_scaling_factor)
+                cursor_y = int(mouse_pos[frame_i]["y"] * camera_scaling_factor)
+                composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
+            frames.append(frame)
+
+        # add padding frames if necessary
+        num_non_padding_frames = len(frames)
+        if len(frames) < self.num_context_frames+1:
+            num_padding = (self.num_context_frames + 1) - len(frames)
+            plucker = torch.cat([plucker, torch.zeros((num_padding, *plucker[0].shape))], dim=0)
+
+            for _ in range(num_padding):
+                frames.append(torch.zeros_like(frames[-1]))
+            
+            frame_indices = torch.cat([frame_indices, torch.full((num_padding,), -1)])
+
+        frames = torch.stack(frames, axis=0)
+
+        # print("returning:", frames.shape, plucker.shape, action.shape, frame_indices.shape)
+
+        return {
+            "frames": frames,
+            "plucker": plucker,
+            "action": action,
+            "timestamps": frame_indices,
+            "num_non_padding_frames": num_non_padding_frames
+        }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, index_path: str):
+    def __init__(self, dataset_dir: str, index_path: str, memory_frames=500, num_context_frames=5):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.index_path = index_path
-        self.dataset = MinecraftDataset(dataset_dir=dataset_dir)
+        self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
     def train_dataloader(self, batch_size):
         return DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
@@ -309,9 +343,23 @@ class MinecraftDataModule(L.LightningDataModule):
 
 
 if __name__ == "__main__":
-    dataset = MinecraftDataset(dataset_dir="../data")
-    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
-    print(len(dataloader))
-    batch = next(iter(dataloader))
-    for item in batch:
-        print(item.shape)
+    dataset = MinecraftDataset(dataset_dir="./data")
+    # dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4)
+
+    for num_workers in [0, 2, 4, 8, 16]:
+        loader = DataLoader(dataset, batch_size=64, num_workers=num_workers)
+        start = time()
+        for i, batch in enumerate(loader):
+            if i == 10:
+                break
+        print(f"Workers: {num_workers}, Time: {time() - start:.2f}s")
+
+    # print("len:", len(dataloader))
+    # start = time()
+    # batch = next(iter(dataloader))
+    # end = time()
+    # print(end - start)
+    # for k, v in batch.items():
+    #     print(k, v.shape)
+
+# 4.6 --> 11.7
