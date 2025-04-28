@@ -73,7 +73,7 @@ class WorldMAR(pl.LightningModule):
 
         # --- decoder ---
         self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, 1, decoder_embed_dim))
         self.decoder_blocks = nn.ModuleList([
             STBlock(decoder_embed_dim, decoder_num_heads, qkv_bias=True,
                     proj_drop=proj_dropout, attn_drop=attn_dropout, 
@@ -175,7 +175,7 @@ class WorldMAR(pl.LightningModule):
                              src=torch.ones(bsz, self.frame_seq_len, device=x.device))
         return mask, offsets # b hw, b
 
-    def forward_encoder(self, x, actions, poses, mask, s_attn_mask=None, t_attn_mask=None):
+    def forward_encoder(self, x, actions, poses, s_attn_mask=None, t_attn_mask=None):
         # x : expected to be b t h w d
         # TODO: double check this actually does across last dim
         x = self.z_proj(x)
@@ -193,13 +193,16 @@ class WorldMAR(pl.LightningModule):
 
         return x
     
-    def forward_decoder(self, x, actions, poses, mask, s_attn_mask=None, t_attn_mask=None):
+    def forward_decoder(self, x, actions, poses, mask, offsets, s_attn_mask=None, t_attn_mask=None):
         # x : expected to be b t h w d
-        x = self.decoder_embed(x)
-        mask_tokens = self.mask_token.repeat(x.shape[0], x.shape[1], 1).to(x.dtype) # creates b (t s) d, all mask token
-        x_full = mask_tokens.clone()
-        x_full[(1-mask).nonzero(as_tuple=True)] = x.reshape(x.shape[0] * x.shape[1], x.shape[2])
-        x = x_full
+        # mask: b hw
+        # offsets: b
+        b, t, h, w, d = x.shape
+
+        s_mask = mask.view(b, 1, h, w)
+        t_mask = (torch.arange(t, device=self.device).unsqueeze(0) == offsets.unsqueeze(1)).view(b, t, 1, 1)
+        full_mask = s_mask & t_mask
+        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)
 
         # TODO: add embs based on pos (RoPE), actions, poses, want:
         #       x_i + E_i, Ei = E_ai + E_pi
@@ -257,10 +260,10 @@ class WorldMAR(pl.LightningModule):
         t_attn_mask_enc = rearrange(t_attn_mask_enc, "b hw t t -> (b hw) t t")
 
         # 4) run encoder
-        x = self.forward_encoder(x, actions, poses, mask, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
+        x = self.forward_encoder(x, actions, poses, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
 
         # 5) run decoder
-        z = self.forward_decoder(x, actions, poses, mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        z = self.forward_decoder(x, actions, poses, mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
 
         # 6) split into tgt frame + diffuse
         idx = offsets + torch.arange(self.frame_seq_len)
