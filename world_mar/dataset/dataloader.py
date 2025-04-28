@@ -7,6 +7,8 @@ import os
 import random
 from multiprocessing import Process, Queue, Event
 
+from ..modules.pose_retrieval import get_most_relevant_poses_to_target
+
 import numpy as np
 import cv2
 import lightning as L
@@ -225,7 +227,6 @@ class MinecraftDataset(Dataset):
 
             action_vectors.append(env_action_to_vector(action))
 
-
             pose_vector = np.array([step_data["xpos"], step_data["ypos"], step_data["zpos"], step_data["pitch"], step_data["yaw"]])
             pose_vectors.append(pose_vector)
 
@@ -236,7 +237,7 @@ class MinecraftDataset(Dataset):
         action_matrix = np.stack(action_vectors, axis=0)
         pose_matrix = np.stack(pose_vectors, axis=0)
 
-        return { "action_matrix": action_vectors, "pose_matrix": pose_matrix, "is_gui_open": is_gui_open, "mouse_pos": mouse_pos }
+        return { "action_matrix": action_matrix, "pose_matrix": pose_matrix, "is_gui_open": is_gui_open, "mouse_pos": mouse_pos }
     
     def _idx_to_demo_and_frame(self, idx) -> Tuple[str, int]:
         for demo_id, start_frame in self.demo_to_start_frame.items():
@@ -269,8 +270,18 @@ class MinecraftDataset(Dataset):
 
         # convert poses to relative
         relative_pose_matrix = pose_matrix.copy()[:frame_idx] - pose_matrix[frame_idx]
-        relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] > np.pi] -= 2 * np.pi
-        relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] < -np.pi] += 2 * np.pi
+        # relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] > np.pi] -= 2 * np.pi
+        # relative_pose_matrix[:, [3,4]][relative_pose_matrix[:, [3,4]] < -np.pi] += 2 * np.pi
+        context_indices = get_most_relevant_poses_to_target()
+
+
+        # sample K context frames using monte-carlo overlap
+        context_frames = []
+        for context_i in context_indices:
+            context_frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
+            context_frames.append(cv2.imread(context_frame_path))
+        context_relative_poses = relative_pose_matrix[context_indices]
+
 
         # compose with cursor
         if is_gui_open[frame_idx]:
@@ -278,14 +289,6 @@ class MinecraftDataset(Dataset):
             cursor_x = int(mouse_pos[frame_idx]["x"] * camera_scaling_factor)
             cursor_y = int(mouse_pos[frame_idx]["y"] * camera_scaling_factor)
             composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
-
-        # sample K context frames using monte-carlo overlap
-        context_indices = ...
-        context_frames = []
-        for context_i in context_indices:
-            context_frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
-            context_frames.append(cv2.imread(context_frame_path))
-        context_relative_poses = relative_pose_matrix[context_indices]
 
         context_frames = np.stack(context_frames, axis=0)
 

@@ -117,7 +117,7 @@ def is_inside_fovs_3d(points, centers, center_pitches, center_yaws, fov_half_h, 
     # Check if both horizontal and vertical angles are within their respective FOV limits
     return (diff_azimuth < fov_half_h) & (diff_elevation < fov_half_v)
 
-def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.3, k=3, do_optim=False):
+def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.3, k=3, do_optim=True):
     """
     Returns the indices of up to k other_poses that have the most overlap with target_pose
 
@@ -151,32 +151,26 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
         for pc in other_poses
     ])
 
-    top_k = []
-    for _ in range(k):
+    most_recent_frame_idx = other_poses.shape[0]-1
+    top_k = [most_recent_frame_idx] # force most recent frame to be in context
+    in_fov1 = in_fov1 & ~in_fov_list[other_poses.shape[0]-1]
+    for _ in range(k-1):
         if in_fov1.sum() < 5:
             break
 
         overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
-        print(overlap_ratio.shape, overlap_ratio[-5:])
 
-        # confidence = overlap_ratio + (curr_frame - frame_idx[:curr_frame]) / curr_frame * (-0.2)
-        confidence = overlap_ratio + torch.arange(other_poses.shape[0], 0, -1) / other_poses.shape[0] * (-0.2) # adds recency bias
+        # add recency bias
+        confidence = overlap_ratio + torch.arange(other_poses.shape[0], 0, -1) / other_poses.shape[0] * (-0.2)
 
         if len(top_k) > 0:
             confidence[torch.tensor(top_k)] = -1e10
         _, r_idx = torch.topk(confidence, k=1, dim=0)
         top_k.append(r_idx[0])
 
-        # choice 1: directly remove overlapping region
-        # occupied_mask = in_fov_list[r_idx[0, range(in_fov1.shape[-1])], :, range(in_fov1.shape[-1])].permute(1,0)
+        # directly remove overlapping region
         in_fov1 = in_fov1 & ~in_fov_list[r_idx[0]]
 
-        # choice 2: apply similarity filter 
-        # cos_sim = F.cosine_similarity(xs_pred.to(r_idx.device)[r_idx[:, range(in_fov1.shape[1])], 
-        #     range(in_fov1.shape[1])], xs_pred.to(r_idx.device)[:curr_frame], dim=2)
-        # cos_sim = cos_sim.mean((-2,-1))
-        # mask_sim = cos_sim>0.9
-        # in_fov_list = in_fov_list & ~mask_sim[:,None].to(in_fov_list.device)
     return torch.tensor(top_k)
 
 def fast_way(target_pose, other_poses, points):
@@ -198,6 +192,17 @@ def fast_way(target_pose, other_poses, points):
 
     overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
     return overlap_ratio
+
+class Memory:
+    def __init__(self, max_size=1000):
+        self.max_size = max_size
+        self.cache = []
+    
+    def insert(self, pose, frame, idx):
+        self.cache.append((pose, frame, idx))
+        if len(self.cache) > self.size:
+            pass
+
 
 if __name__ == "__main__":
     # pose_conditions = torch.tensor([
