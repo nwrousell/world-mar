@@ -15,6 +15,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
 from einops import rearrange
 from world_mar.modules.attention import STBlock
+from world_mar.modules.embeddings.timestep_embedding import TimestepEmbedder
 from world_mar.modules.utils import instantiate_from_config
 from world_mar.oasis_utils.vae import AutoencoderKL
 from world_mar.models.diffloss import DiffLoss
@@ -61,6 +62,15 @@ class WorldMAR(pl.LightningModule):
         self.pred_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
         self.prev_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
         self.ctx_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
+        # small networks to process pose, action, and timestep embeddings
+        plucker_dim = 6
+        pose_embedding_hidden_dim = 128
+        self.pose_embedder = nn.Sequential(
+            nn.Linear(plucker_dim, pose_embedding_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(pose_embedding_hidden_dim, encoder_embed_dim)
+        )
+        self.timestep_embedder = TimestepEmbedder(hidden_size=1025)
         # RoPE rotary embeddings for encoder blocks along spatial and temporal dimensions
         self.enc_spatial_rotary_emb = RotaryEmbedding(dim=encoder_embed_dim // encoder_num_heads // 2, freqs_for="pixel", max_freq=256)
         self.enc_temporal_rotary_emb = RotaryEmbedding(dim=encoder_embed_dim // encoder_num_heads)
@@ -199,28 +209,34 @@ class WorldMAR(pl.LightningModule):
     def add_token_buffers(self, x):
         B, T, H, W, D = x.shape
         # tokens: expected to be d-dimensional vectors
-        pred_token_buffer = self.pred_token.view(1, 1, 1, 1, D).repeat(B, 1, H, W, 1)
-        prev_token_buffer = self.prev_token.view(1, 1, 1, 1, D).repeat(B, 1, H, W, 1)
-        ctx_token_buffer = self.ctx_token.view(1, 1, 1, 1, D).repeat(B, T-2, H, W, 1)
+        pred_token_buffer = self.pred_token.view(1, 1, 1, 1, D).repeat(B, 1, 1, W, 1)  # (B, 1, 1, W, D)
+        prev_token_buffer = self.prev_token.view(1, 1, 1, 1, D).repeat(B, 1, 1, W, 1)  # (B, 1, 1, W, D)
+        ctx_token_buffer = self.ctx_token.view(1, 1, 1, 1, D).repeat(B, T-2, 1, W, 1)  # (B, T-2, 1, W, D)
         # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim) 
         # concat [PREV] token buffer to x[:, 1] (second elements along temporal dim)
         # concat [CTX] token buffer to x[:, 2:] (third, fourth, fifth, ... elements along temporal dim)
+        # these concatenations are happening along H, the height dimension (could've been W equivalently)
         x = torch.cat([
             torch.cat([x[:, 0:1], pred_token_buffer], dim=-3),
             torch.cat([x[:, 1:2], prev_token_buffer], dim=-3),
             torch.cat([x[:, 2:], ctx_token_buffer], dim=-3)
-        ], dim=-4)
+        ], dim=-4)  # dim=-3 is H and dim=-4 is T
         return x
 
     def forward_encoder(self, x, actions, poses, mask, s_attn_mask=None, t_attn_mask=None):
-        # x : expected to be b t h w d
+        # x:       (B, T, H, W, token_embed_dim)
+        # actions: (B, 25)
+        # poses:   (B, T, 40H, 40W, 6)
         # TODO: double check this actually does across last dim
-        x = self.z_proj(x)
-        bsz, _,  = x.shape
+        x = self.z_proj(x)  # (B, T, H, W, D)
+        B, T, H, W, D  = x.shape
 
-        # TODO: add embs based on pos, actions, poses, want:
-        #       x_i + E_i, Ei = E_ai + E_pi
-        x = ...
+        # add pose, action, and timestep embeddings
+        poses = poses[:, :, ::40, ::40, :]  # (B, T, H, W, 6)
+        poses = self.pose_embedder(poses)   # (B, T, H, W, D)
+
+        timesteps = torch.arange(T).unsqueeze(0).expand((B, -1))  # (B, T)
+
         # TODO: double check this actually does across last dim
         x = self.z_proj_ln(x)
 
@@ -229,7 +245,7 @@ class WorldMAR(pl.LightningModule):
         x = self.encoder_norm(x)
 
         return x
-    
+
     def forward_decoder(self, x, actions, poses, mask, offsets, s_attn_mask=None, t_attn_mask=None):
         # x : expected to be b t h w d
         # mask: b hw
