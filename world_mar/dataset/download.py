@@ -102,6 +102,15 @@ def download_video_and_action_files(basedir: str, relpath: str, pbar):
         os.remove(outpath)
         return
     
+    try:
+        with open(jsonl_outpath, "rt") as f:
+            _ = json.loads("[" + ",".join(f.readlines()) + "]")
+    except Exception as e:
+        print(f"\tError decoding {jsonl_outpath}: {e}. Cleaning up mp4/jsonl and moving on")
+        os.remove(outpath)
+        os.remove(jsonl_outpath)
+        return
+
     # unroll into folder of jpgs
     folder_path = outpath.removesuffix(".mp4")
     demo_id = os.path.basename(folder_path)
