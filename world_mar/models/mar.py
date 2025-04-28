@@ -125,12 +125,11 @@ class WorldMAR(pl.LightningModule):
         self.num_frames = num_frames
     
     def initialize_weights(self):
-        torch.nn.init.normal_(self.pred_token, std=.02)
-        torch.nn.init.normal_(self.prev_token, std=.02)
-        torch.nn.init.normal_(self.ctx_token, std=.02)
-        torch.nn.init.normal_(self.mask_token, std=.02)
-        torch.nn.init.normal_(self.diffusion_pos_emb_learned, std=.02)
-
+        torch.nn.init.kaiming_normal_(self.pred_token)
+        torch.nn.init.kaiming_normal_(self.prev_token)
+        torch.nn.init.kaiming_normal_(self.ctx_token)
+        torch.nn.init.kaiming_normal_(self.mask_token)
+        torch.nn.init.kaiming_normal_(self.diffusion_pos_emb_learned)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -217,7 +216,7 @@ class WorldMAR(pl.LightningModule):
         # x : expected to be b t h w d
         # TODO: double check this actually does across last dim
         x = self.z_proj(x)
-        bsz, _, embed_dim = x.shape
+        bsz, _,  = x.shape
 
         # TODO: add embs based on pos, actions, poses, want:
         #       x_i + E_i, Ei = E_ai + E_pi
