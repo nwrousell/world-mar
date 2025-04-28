@@ -410,7 +410,6 @@ class WorldMAR(pl.LightningModule):
 
         # --- forward + backprop ---
         loss = self(frames, actions, poses, padding_mask=padding_mask)
-        self.logger.log_metrics()
         self.log("train_loss", loss)
         self.manual_backward(loss)
 
