@@ -399,7 +399,7 @@ class WorldMAR(pl.LightningModule):
         frames = batch["frames"].to(self.device) # shape [B, T, C, H, W]
         batch_nframes = batch["num_frames"].to(self.device) # shape [B,]
         actions = batch["actions"].to(self.device) # shape ...
-        poses = batch["poses"].to(self.device) # shape [B, T, 5]
+        poses = batch["poses"].to(self.device) # shape [B, T, H, W, 6] (plucker)
 
         # --- construct attn_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
