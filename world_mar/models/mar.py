@@ -182,14 +182,17 @@ class WorldMAR(pl.LightningModule):
         orders = torch.Tensor(np.array(orders)).cuda().long()
         return orders
 
-    def random_masking(self, x, orders):
+    def random_masking(self, x, orders, random_offset=False):
         bsz, _, embed_dim = x.shape
         mask_rate = self.mask_ratio_gen.rvs(1)[0]
         num_masked_tokens = int(np.ceil((self.frame_seq_len) * mask_rate))
         mask = torch.zeros(bsz, self.frame_seq_len, device=x.device)
         # TODO: consider moving this offset to any frame?
         #       this is 0 currently because pred frame is at start of seq
-        offsets = torch.zeros(bsz, 1, device=x.device)
+        if random_offset:
+            offsets = torch.randint(high=self.num_frames, size=bsz)
+        else:
+            offsets = torch.zeros(bsz, device=x.device)
         mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
                              src=torch.ones(bsz, self.frame_seq_len, device=x.device))
         return mask, offsets # b hw, b
@@ -317,6 +320,8 @@ class WorldMAR(pl.LightningModule):
 
         # --- forward + backprop ---
         loss = self(frames, actions, poses, padding_mask=padding_mask)
+        self.logger.log_metrics()
+        self.log("train_loss", loss)
         self.manual_backward(loss)
 
         opt.step()
