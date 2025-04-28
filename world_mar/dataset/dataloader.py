@@ -12,7 +12,7 @@ from ..modules.pose_retrieval import get_most_relevant_poses_to_target, get_rela
 
 import numpy as np
 import cv2
-import lightning as L
+import pytorch_lightning as L
 import torch
 from torch.utils.data import DataLoader, Dataset
 QUEUE_TIMEOUT = 10

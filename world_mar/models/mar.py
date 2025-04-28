@@ -249,10 +249,10 @@ class WorldMAR(pl.LightningModule):
         t_attn_mask = rearrange(t_attn_mask, "b hw t t -> (b hw) t t")
 
         # 4) run encoder
-        x = self.forward_encoder(x, actions, poses, mask, t_attn_mask=t_attn_mask)
+        x = self.forward_encoder(x, actions, poses, mask, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
 
         # 5) run decoder
-        z = self.forward_decoder(x, actions, poses, mask, t_attn_mask=t_attn_mask)
+        z = self.forward_decoder(x, actions, poses, mask, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
 
         # 6) split into tgt frame + diffuse
         idx = offsets + torch.arange(self.frame_seq_len)
