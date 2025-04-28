@@ -117,7 +117,7 @@ def is_inside_fovs_3d(points, centers, center_pitches, center_yaws, fov_half_h, 
     # Check if both horizontal and vertical angles are within their respective FOV limits
     return (diff_azimuth < fov_half_h) & (diff_elevation < fov_half_v)
 
-def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.3, k=3, do_optim=True):
+def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.05, k=3, do_optim=True):
     """
     Returns the indices of up to k other_poses that have the most overlap with target_pose
 
@@ -151,11 +151,13 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
         for pc in other_poses
     ])
 
+    min_overlap_points = in_fov1.sum() * min_overlap
+
     most_recent_frame_idx = other_poses.shape[0]-1
     top_k = [most_recent_frame_idx] # force most recent frame to be in context
     in_fov1 = in_fov1 & ~in_fov_list[other_poses.shape[0]-1]
     for _ in range(k-1):
-        if in_fov1.sum() < 5:
+        if in_fov1.sum() < min_overlap_points:
             break
 
         overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
@@ -194,14 +196,55 @@ def fast_way(target_pose, other_poses, points):
     return overlap_ratio
 
 class Memory:
-    def __init__(self, max_size=1000):
+    def __init__(self, max_size=1000, remove_redundancy=False):
+        self.remove_redundancy = remove_redundancy
         self.max_size = max_size
         self.cache = []
     
-    def insert(self, pose, frame, idx):
+    def insert(self, pose, frame, idx, points):
         self.cache.append((pose, frame, idx))
-        if len(self.cache) > self.size:
-            pass
+
+        # cache not filled; return
+        if len(self.cache) <= self.max_size:
+            return
+        
+        # don't remove redundancy (FIFO); keep last max_size frames
+        if not self.remove_redundancy:
+            self.cache[-self.max_size:]
+            return
+        
+        # remove redundancy
+        fov_half_h = torch.tensor(105 / 2, device=pose_conditions.device)
+        fov_half_v = torch.tensor(75 / 2, device=pose_conditions.device)
+
+        in_fov1 = is_inside_fov_3d_hv(
+            points, 
+            pose[:3], 
+            pose[-2], 
+            pose[-1], 
+            fov_half_h, 
+            fov_half_v
+        )
+
+        points = points[in_fov1]
+        in_fov1 = in_fov1[in_fov1]
+
+        in_fov_list = torch.stack([
+            is_inside_fov_3d_hv(points, pose_cache[:3], pose_cache[-2], pose_cache[-1], fov_half_h, fov_half_v)
+            for pose_cache, _, _ in self.cache
+        ])
+
+        overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
+        # add recency bias
+        confidence = overlap_ratio + (idx - [idx_cache for _, _, idx_cache in self.cache[:-1]]) / frame * 0.2
+        _, r_idx = torch.topk(confidence, k=1, dim=0)
+        del self.cache[r_idx[0]]
+
+
+
+        
+
+        
 
 
 if __name__ == "__main__":
