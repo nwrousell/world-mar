@@ -9,7 +9,7 @@ from timm.models.vision_transformer import LayerScale, use_fused_attn
 from timm.layers import Mlp, DropPath
 from torch.jit import Final
 
-from typing import Any, Callable, Dict, Optional, Set, Tuple, Type, Union, List
+from typing import Optional, Type 
 
 class MaskedAttention(nn.Module):
     fused_attn: Final[bool]

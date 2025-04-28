@@ -252,13 +252,14 @@ class WorldMAR(pl.LightningModule):
         # --- parse batch ---
         # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
         frames = batch["frames"].to(self.device) # shape [B, T, C, H, W]
-        n_context = batch["num_frames"].to(self.device) # shape [B,]
+        n_frames = batch["num_frames"].to(self.device) # shape [B,]
         actions = batch["actions"].to(self.device) # shape ...
         poses = batch["poses"].to(self.device) # shape [B, T, 5]
 
         # --- construct attn_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
-        valid_ts = n_context * self.frame_seq_len
+        assert not torch.any(n_frames > self.num_frames)
+        valid_ts = n_frames * self.frame_seq_len
         idx = torch.arange(L, device=self.device).expand(B, L)
         attn_mask = idx < valid_ts.unsqueeze(1)
 
