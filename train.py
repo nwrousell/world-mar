@@ -13,6 +13,8 @@ from einops import rearrange
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import WandbLogger
+
 from world_mar.modules.utils import instantiate_from_config
 
 LOG_PARENT = "logs"
@@ -85,7 +87,7 @@ def main(args):
         callbacks=callbacks
     )
 
-    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path)
+    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path, logger=WandbLogger(project="WorldMar", log_model="all"))
 
     # dataloader = ...
     # vae = ...
