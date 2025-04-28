@@ -185,7 +185,7 @@ class WorldMAR(pl.LightningModule):
     def random_masking(self, x, orders, random_offset=False):
         bsz, _, embed_dim = x.shape
         mask_rate = self.mask_ratio_gen.rvs(1)[0]
-        num_masked_tokens = int(np.ceil((self.frame_seq_len) * mask_rate))
+        num_masked_tokens = int(np.ceil(self.frame_seq_len * mask_rate))
         mask = torch.zeros(bsz, self.frame_seq_len, device=x.device)
         # TODO: consider moving this offset to any frame?
         #       this is 0 currently because pred frame is at start of seq
@@ -260,6 +260,7 @@ class WorldMAR(pl.LightningModule):
     def construct_attn_masks(self, x, mask, offsets, padding_mask=None):
         b, t, h, w, d = x.shape
         batch_idx = torch.arange(b, device=self.device)
+
         # --- spatial attn mask ---
         valid_hw = torch.ones(b, t, h*w)
         if padding_mask is not None:
@@ -358,9 +359,9 @@ class WorldMAR(pl.LightningModule):
         b = frames.shape[0]
 
         # 1) compress frames w/ vae
-        x = rearrange(frames, "b t c h w -> (b t) c h w")
+        x = rearrange(frames, "b t h w c -> (b t) c h w")
         x = self.vae.encode(frames).sample() # (b t) (h w) d
-        x = self.patchify(x) # (bt) h w d
+        x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
         x = rearrange(x, "(b t) h w d -> b t h w d", b=b)
         x_gt = x.clone().detach()
 
@@ -396,10 +397,11 @@ class WorldMAR(pl.LightningModule):
 
         # --- parse batch ---
         # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
-        frames = batch["frames"].to(self.device) # shape [B, T, C, H, W]
-        batch_nframes = batch["num_frames"].to(self.device) # shape [B,]
-        actions = batch["actions"].to(self.device) # shape ...
-        poses = batch["poses"].to(self.device) # shape [B, T, 5]
+        frames = batch["frames"].to(self.device) # shape [B, T, H, W, C] # TODO: align with dataloader permutation
+        batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
+        actions = batch["actions"].to(self.device) # shape [B, 25]
+        poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
+        timestamps = batch["timestamps"].to(self.device) # shape [B, T]
 
         # --- construct attn_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
