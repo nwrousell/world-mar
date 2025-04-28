@@ -263,7 +263,8 @@ class WorldMAR(pl.LightningModule):
         valid_hw = torch.ones(b, t, h*w)
         if padding_mask is not None:
             valid_hw &= padding_mask.unsqueeze(-1)
-        s_attn_mask_dec = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
+        valid_hw = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
+        s_attn_mask_dec = valid_hw
         
         valid_hw[batch_idx, offsets] = mask
         s_attn_mask_enc = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
@@ -273,7 +274,8 @@ class WorldMAR(pl.LightningModule):
         valid_t = torch.ones(b, h*w, t, dtype=torch.bool, device=self.device)
         if padding_mask is not None:
             valid_t &= padding_mask.unsqueeze(1)
-        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
+        valid_t = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
+        t_attn_mask_dec = valid_t
 
         valid_t[batch_idx, mask, offsets] = False
         
