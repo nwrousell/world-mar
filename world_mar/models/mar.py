@@ -16,7 +16,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
 from einops import rearrange
 
-from timm.models.vision_transformer import Block
+from world_mar.modules.attention import MaskedBlock
 
 # from models.diffloss import DiffLoss
 
@@ -39,8 +39,7 @@ class WorldMAR(pl.LightningModule):
     """
     def __init__(self, 
                  vae_config, # should be an AutoencoderKL 
-                 diffloss_config,
-                 img_height=360, img_width=640, 
+                 img_height=360, img_width=640, num_frames=5,
                  patch_size=2, token_embed_dim=16,
                  encoder_embed_dim=512, encoder_depth=16, encoder_num_heads=16,
                  decoder_embed_dim=512, decoder_depth=16, decoder_num_heads=16,
@@ -54,7 +53,6 @@ class WorldMAR(pl.LightningModule):
         super().__init__()
         self.automatic_optimization = False
 
-
         # --- masking statistics ---
         # ref: masking ratio used by MAR for image gen
         self.mask_ratio_gen = stats.truncnorm((mask_ratio_min -1.0) / 0.25, 0, loc=1.0, scale=0.25)
@@ -64,7 +62,7 @@ class WorldMAR(pl.LightningModule):
         self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True) # projs VAE latents to transformer dim
         self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
         self.encoder_blocks = nn.ModuleList([
-            Block(encoder_embed_dim, encoder_num_heads, qkv_bias=True,
+            MaskedBlock(encoder_embed_dim, encoder_num_heads, qkv_bias=True,
                   proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(encoder_depth)])
         self.encoder_norm = nn.LayerNorm(encoder_embed_dim)
         # TODO: embs for ctx, prev, action
@@ -73,7 +71,7 @@ class WorldMAR(pl.LightningModule):
         self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
         self.decoder_blocks = nn.ModuleList([
-            Block(decoder_embed_dim, decoder_num_heads, qkv_bias=True,
+            MaskedBlock(decoder_embed_dim, decoder_num_heads, qkv_bias=True,
                   proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(decoder_depth)])
         self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
         # TODO: embs for ctx, prev, action
@@ -103,6 +101,7 @@ class WorldMAR(pl.LightningModule):
         self.frame_seq_len = self.seq_h, self.seq_w
         # we assume here the diffusion model operates one frame at a time:
         self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.frame_seq_len, decoder_embed_dim))
+        self.num_frames = num_frames
     
     def initialize_weights(self):
         torch.nn.init.normal_(self.mask_token, std=.02)
@@ -170,7 +169,7 @@ class WorldMAR(pl.LightningModule):
                              src=torch.ones(bsz, seq_len, device=x.device))
         return mask, offsets
 
-    def forward_encoder(self, x, actions, poses, mask):
+    def forward_encoder(self, x, actions, poses, mask, attn_mask=None):
         # x : expected to be b (t s) d
         x = self.z_proj(x)
         bsz, _, embed_dim = x.shape
@@ -183,12 +182,12 @@ class WorldMAR(pl.LightningModule):
         x = x[(1-mask).nonzero(as_tuple=True)].reshape(bsz, -1, embed_dim)
 
         for block in self.encoder_blocks:
-            x = block(x)
+            x = block(x, attn_mask=attn_mask)
         x = self.encoder_norm(x)
 
         return x
     
-    def forward_decoder(self, x, actions, poses, mask):
+    def forward_decoder(self, x, actions, poses, mask, attn_mask=None):
         x = self.decoder_embed(x)
         mask_tokens = self.mask_token.repeat(x.shape[0], x.shape[1], 1).to(x.dtype) # creates b (t s) d, all mask token
         x_full = mask_tokens.clone()
@@ -200,7 +199,7 @@ class WorldMAR(pl.LightningModule):
         # THESE SHOULD BE DIFF FROM THE ENCODER ONES
         x = ...
         for block in self.decoder_blocks:
-            x = block(x)
+            x = block(x, attn_mask=attn_mask)
         x = self.decoder_norm(x)
     
     def forward_diffusion(self, z, tgt, mask):
@@ -210,7 +209,7 @@ class WorldMAR(pl.LightningModule):
         loss = self.diffloss(z=z, target=tgt, mask=mask)
         return loss
 
-    def forward(self, frames, actions, poses):
+    def forward(self, frames, actions, poses, attn_mask=None):
         # TODO: fill this out more detail
 
         b, t, c, h, w = frames.shape
@@ -226,13 +225,13 @@ class WorldMAR(pl.LightningModule):
         orders = self.sample_orders(b)
         mask, offsets = self.random_masking(x, orders)
 
-        # 2) run encoder
-        x = self.forward_encoder(x, actions, poses, mask)
+        # 3) run encoder
+        x = self.forward_encoder(x, actions, poses, mask, attn_mask=attn_mask)
 
-        # 3) run decoder
-        z = self.forward_decoder(x, actions, poses, mask)
+        # 4) run decoder
+        z = self.forward_decoder(x, actions, poses, mask, attn_mask=attn_mask)
 
-        # 4) split into tgt frame + diffuse
+        # 5) split into tgt frame + diffuse
         idx = offsets + torch.arange(self.frame_seq_len)
         idx = idx.unsqueeze(-1).expand(-1,-1,z.shape[-1])
         z_t = torch.gather(z, dim=1, index=idx) 
@@ -250,13 +249,21 @@ class WorldMAR(pl.LightningModule):
         lr_sched = self.lr_schedulers()
         opt.zero_grad()
 
-        # parse batch 
+        # --- parse batch ---
         # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
         frames = batch["frames"].to(self.device) # shape [B, T, C, H, W]
+        n_frames = batch["num_frames"].to(self.device) # shape [B,]
         actions = batch["actions"].to(self.device) # shape ...
         poses = batch["poses"].to(self.device) # shape [B, T, 5]
 
-        loss = self(frames, actions, poses)
+        # --- construct attn_mask ---
+        B, L = len(frames), self.num_frames * self.frame_seq_len
+        assert not torch.any(n_frames > self.num_frames)
+        valid_ts = n_frames * self.frame_seq_len
+        idx = torch.arange(L, device=self.device).expand(B, L)
+        attn_mask = idx < valid_ts.unsqueeze(1)
+
+        loss = self(frames, actions, poses, attn_mask=attn_mask)
         self.manual_backward(loss)
 
         opt.step()
