@@ -213,8 +213,8 @@ class WorldMAR(pl.LightningModule):
         x = self.decoder_norm(x)
     
     def forward_diffusion(self, z, tgt, mask):
-        tgt = rearrange(tgt, "b s d -> (b s) d").repeat(self.diffusion_batch_mul, 1)
-        z = rearrange(z, "b s d -> (b s) d").repeat(self.diffusion_batch_mul, 1) # ad
+        tgt = rearrange(tgt, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1)
+        z = rearrange(z, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1) # ad
         mask = rearrange(mask, "b s -> (b s)").repeat(self.diffusion_batch_mul)
         loss = self.diffloss(z=z, target=tgt, mask=mask)
         return loss
@@ -264,16 +264,13 @@ class WorldMAR(pl.LightningModule):
 
         # 5) run decoder
         z = self.forward_decoder(x, actions, poses, mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        # z : b t h w d
 
         # 6) split into tgt frame + diffuse
-        idx = offsets + torch.arange(self.frame_seq_len)
-        idx = idx.unsqueeze(-1).expand(-1,-1,z.shape[-1])
-        z_t = torch.gather(z, dim=1, index=idx) 
-        xt_gt = torch.gather(x_gt, dim=1, index=idx)
-        # WARNING: THIS IS BAD IF WE ARE DOING DIFF FRAME PRED!!!!
-        mask_t = mask[:,:self.frame_seq_len]
+        z_t = x[batch_idx, offsets] # b h w d
+        xt_gt = x_gt[batch_idx, offsets] # b h w d
 
-        loss = self.forward_diffusion(z_t, xt_gt, mask_t)        
+        loss = self.forward_diffusion(z_t, xt_gt, mask)        
 
         return loss
 
@@ -296,6 +293,7 @@ class WorldMAR(pl.LightningModule):
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
+        # --- forward + backprop ---
         loss = self(frames, actions, poses, padding_mask=padding_mask)
         self.manual_backward(loss)
 
