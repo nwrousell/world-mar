@@ -163,7 +163,7 @@ class STBlock(nn.Module):
             drop=proj_drop,
         )
 
-        # --- temporal attention block
+        # --- temporal attention block ---
         self.t_norm1 = norm_layer(dim)
         self.temporal_attn = TemporalAxialAttention(
             dim=dim,
