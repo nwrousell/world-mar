@@ -16,6 +16,10 @@ from world_mar.oasis_utils.rotary_embedding_torch import RotaryEmbedding, apply_
 from world_mar.oasis_utils.dit import PatchEmbed
 from safetensors.torch import load_model
 
+def format_image(x : torch.Tensor):
+    x = 2 * (x.bfloat16() / 255.0) - 1
+    return x
+
 class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False, dim=1):
         self.parameters = parameters

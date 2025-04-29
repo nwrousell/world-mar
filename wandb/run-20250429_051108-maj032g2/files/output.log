@@ -1,0 +1,76 @@
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+
+   | Name                         | Type             | Params | Mode
+---------------------------------------------------------------------------
+0  | pose_embedder                | Sequential       | 66.9 K | train
+1  | timestamp_embedder           | TimestepEmbedder | 394 K  | train
+2  | action_embedder              | Sequential       | 69.4 K | train
+3  | enc_spatial_rotary_embedder  | RotaryEmbedding  | 16     | train
+4  | enc_temporal_rotary_embedder | RotaryEmbedding  | 32     | train
+5  | dec_spatial_rotary_embedder  | RotaryEmbedding  | 16     | train
+6  | dec_temporal_rotary_embedder | RotaryEmbedding  | 32     | train
+7  | z_proj                       | Linear           | 33.3 K | train
+8  | z_proj_ln                    | LayerNorm        | 1.0 K  | train
+9  | encoder_blocks               | ModuleList       | 50.4 M | train
+10 | encoder_norm                 | LayerNorm        | 1.0 K  | train
+11 | decoder_blocks               | ModuleList       | 50.4 M | train
+12 | decoder_norm                 | LayerNorm        | 1.0 K  | train
+13 | diffloss                     | DiffLoss         | 5.2 M  | train
+14 | vae                          | AutoencoderKL    | 229 M  | train
+   | other params                 | n/a              | 106 K  | n/a
+---------------------------------------------------------------------------
+106 M     Trainable params
+229 M     Non-trainable params
+335 M     Total params
+1,343.886 Total estimated model params size (MB)
+711       Modules in train mode
+0         Modules in eval mode
+Traceback (most recent call last):
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/runpy.py", line 197, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/home/ubuntu/.vscode-server/extensions/ms-python.debugpy-2025.6.0-linux-x64/bundled/libs/debugpy/adapter/../../debugpy/launcher/../../debugpy/__main__.py", line 71, in <module>
+    cli.main()
+  File "/home/ubuntu/.vscode-server/extensions/ms-python.debugpy-2025.6.0-linux-x64/bundled/libs/debugpy/adapter/../../debugpy/launcher/../../debugpy/../debugpy/server/cli.py", line 501, in main
+    run()
+  File "/home/ubuntu/.vscode-server/extensions/ms-python.debugpy-2025.6.0-linux-x64/bundled/libs/debugpy/adapter/../../debugpy/launcher/../../debugpy/../debugpy/server/cli.py", line 351, in run_file
+    runpy.run_path(target, run_name="__main__")
+  File "/home/ubuntu/.vscode-server/extensions/ms-python.debugpy-2025.6.0-linux-x64/bundled/libs/debugpy/_vendored/pydevd/_pydevd_bundle/pydevd_runpy.py", line 310, in run_path
+    return _run_module_code(code, init_globals, run_name, pkg_name=pkg_name, script_name=fname)
+  File "/home/ubuntu/.vscode-server/extensions/ms-python.debugpy-2025.6.0-linux-x64/bundled/libs/debugpy/_vendored/pydevd/_pydevd_bundle/pydevd_runpy.py", line 127, in _run_module_code
+    _run_code(code, mod_globals, init_globals, mod_name, mod_spec, pkg_name, script_name)
+  File "/home/ubuntu/.vscode-server/extensions/ms-python.debugpy-2025.6.0-linux-x64/bundled/libs/debugpy/_vendored/pydevd/_pydevd_bundle/pydevd_runpy.py", line 118, in _run_code
+    exec(code, run_globals)
+  File "/home/ubuntu/world-mar/train.py", line 126, in <module>
+    main(args)
+  File "/home/ubuntu/world-mar/train.py", line 91, in main
+    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 561, in fit
+    call._call_and_handle_interrupt(
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/call.py", line 48, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 599, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 1012, in _run
+    results = self._run_stage()
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 1056, in _run_stage
+    self.fit_loop.run()
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/fit_loop.py", line 208, in run
+    self.setup_data()
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/fit_loop.py", line 237, in setup_data
+    train_dataloader = _request_dataloader(source)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/connectors/data_connector.py", line 326, in _request_dataloader
+    return data_source.dataloader()
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/connectors/data_connector.py", line 293, in dataloader
+    return call._call_lightning_datamodule_hook(self.instance.trainer, self.name)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/call.py", line 198, in _call_lightning_datamodule_hook
+    return fn(*args, **kwargs)
+  File "/home/ubuntu/world-mar/world_mar/dataset/dataloader.py", line 404, in train_dataloader
+    return DataLoader(self.dataset, batch_size=self.batch_sz, shuffle=True)
+AttributeError: 'MinecraftDataModule' object has no attribute 'batch_size'
+Error in atexit._run_exitfuncs:
+Traceback (most recent call last):
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/threading.py", line 1080, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+KeyboardInterrupt

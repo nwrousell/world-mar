@@ -1,0 +1,7 @@
+{"time":"2025-04-29T05:14:00.447348357Z","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"wandb/run-20250429_051400-cm551g92/logs/debug-core.log"}
+{"time":"2025-04-29T05:14:00.664729333Z","level":"INFO","msg":"created new stream","id":"cm551g92"}
+{"time":"2025-04-29T05:14:00.664782694Z","level":"INFO","msg":"stream: started","id":"cm551g92"}
+{"time":"2025-04-29T05:14:00.664834885Z","level":"INFO","msg":"writer: Do: started","stream_id":"cm551g92"}
+{"time":"2025-04-29T05:14:00.664844975Z","level":"INFO","msg":"handler: started","stream_id":"cm551g92"}
+{"time":"2025-04-29T05:14:00.664921837Z","level":"INFO","msg":"sender: started","stream_id":"cm551g92"}
+{"time":"2025-04-29T05:14:01.064754764Z","level":"INFO","msg":"Starting system monitor"}

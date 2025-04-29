@@ -3,7 +3,7 @@ Adapted from: https://github.com/xizaoqu/WorldMem/blob/main/algorithms/worldmem/
 """
 
 from einops import rearrange
-from embeddings.rotary_embedding import RotaryEmbedding, apply_rotary_emb
+from .embeddings.rotary_embedding import RotaryEmbedding, apply_rotary_emb
 import numpy as np
 from typing import Optional
 from collections import namedtuple
@@ -41,7 +41,7 @@ class STBlock(nn.Module):
         self.s_norm1 = norm_layer(dim)
         self.spatial_attn = SpatialAxialAttention(
             dim=dim,
-            num_heads=num_heads,
+            heads=num_heads,
             dim_head=dim // num_heads,
             rotary_emb=spatial_rotary_emb 
         )
@@ -58,7 +58,7 @@ class STBlock(nn.Module):
         self.t_norm1 = norm_layer(dim)
         self.temporal_attn = TemporalAxialAttention(
             dim=dim,
-            num_heads=num_heads,
+            heads=num_heads,
             dim_head=dim // num_heads,
             rotary_emb=temporal_rotary_emb 
         )

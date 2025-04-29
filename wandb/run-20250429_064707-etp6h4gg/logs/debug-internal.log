@@ -1,0 +1,7 @@
+{"time":"2025-04-29T06:47:07.514486381Z","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"wandb/run-20250429_064707-etp6h4gg/logs/debug-core.log"}
+{"time":"2025-04-29T06:47:07.752710867Z","level":"INFO","msg":"created new stream","id":"etp6h4gg"}
+{"time":"2025-04-29T06:47:07.752738968Z","level":"INFO","msg":"stream: started","id":"etp6h4gg"}
+{"time":"2025-04-29T06:47:07.75286511Z","level":"INFO","msg":"writer: Do: started","stream_id":"etp6h4gg"}
+{"time":"2025-04-29T06:47:07.752899651Z","level":"INFO","msg":"sender: started","stream_id":"etp6h4gg"}
+{"time":"2025-04-29T06:47:07.752926521Z","level":"INFO","msg":"handler: started","stream_id":"etp6h4gg"}
+{"time":"2025-04-29T06:47:08.284136971Z","level":"INFO","msg":"Starting system monitor"}

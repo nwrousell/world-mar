@@ -1,0 +1,7 @@
+{"time":"2025-04-29T06:04:08.057072939Z","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"wandb/run-20250429_060408-csjdmdk7/logs/debug-core.log"}
+{"time":"2025-04-29T06:04:08.269653126Z","level":"INFO","msg":"created new stream","id":"csjdmdk7"}
+{"time":"2025-04-29T06:04:08.269687186Z","level":"INFO","msg":"stream: started","id":"csjdmdk7"}
+{"time":"2025-04-29T06:04:08.269711687Z","level":"INFO","msg":"writer: Do: started","stream_id":"csjdmdk7"}
+{"time":"2025-04-29T06:04:08.269765888Z","level":"INFO","msg":"handler: started","stream_id":"csjdmdk7"}
+{"time":"2025-04-29T06:04:08.269781768Z","level":"INFO","msg":"sender: started","stream_id":"csjdmdk7"}
+{"time":"2025-04-29T06:04:08.575880265Z","level":"INFO","msg":"Starting system monitor"}

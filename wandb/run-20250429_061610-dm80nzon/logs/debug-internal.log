@@ -1,0 +1,7 @@
+{"time":"2025-04-29T06:16:10.897966522Z","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"wandb/run-20250429_061610-dm80nzon/logs/debug-core.log"}
+{"time":"2025-04-29T06:16:11.113666415Z","level":"INFO","msg":"created new stream","id":"dm80nzon"}
+{"time":"2025-04-29T06:16:11.113732857Z","level":"INFO","msg":"stream: started","id":"dm80nzon"}
+{"time":"2025-04-29T06:16:11.113759868Z","level":"INFO","msg":"writer: Do: started","stream_id":"dm80nzon"}
+{"time":"2025-04-29T06:16:11.113991622Z","level":"INFO","msg":"handler: started","stream_id":"dm80nzon"}
+{"time":"2025-04-29T06:16:11.114013574Z","level":"INFO","msg":"sender: started","stream_id":"dm80nzon"}
+{"time":"2025-04-29T06:16:11.42841087Z","level":"INFO","msg":"Starting system monitor"}

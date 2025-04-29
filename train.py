@@ -85,10 +85,10 @@ def main(args):
     # TODO: add logger
     trainer = pl.Trainer(
         accelerator=accelerator, devices=num_devices, precision="bf16-mixed",
-        callbacks=callbacks
+        callbacks=callbacks, logger=WandbLogger(project="WorldMar", log_model="all")
     )
 
-    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path, logger=WandbLogger(project="WorldMar", log_model="all"))
+    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path)
 
 if __name__ == '__main__':
     parser = ArgumentParser()

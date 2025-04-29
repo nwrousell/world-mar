@@ -325,6 +325,7 @@ class MinecraftDataset(Dataset):
         return self.total_frames - len(self.demo_to_metadata.keys()) # we can't sample first frames cause we won't have context
 
     def __getitem__(self, idx):
+        idx = 20 # TODO: REMOVE HARD CODED FOR TEST
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
 
         assert frame_idx > 0        
@@ -372,8 +373,8 @@ class MinecraftDataset(Dataset):
 
         # add padding frames if necessary
         num_non_padding_frames = len(frames)
-        if len(frames) < self.num_context_frames+1:
-            num_padding = (self.num_context_frames + 1) - len(frames)
+        if len(frames) < self.num_context_frames:
+            num_padding = self.num_context_frames - len(frames)
             plucker = torch.cat([plucker, torch.zeros((num_padding, *plucker[0].shape))], dim=0)
 
             for _ in range(num_padding):
@@ -394,16 +395,17 @@ class MinecraftDataset(Dataset):
         }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, memory_frames=500, num_context_frames=5):
+    def __init__(self, dataset_dir: str, batch_sz=16, memory_frames=500, num_context_frames=5):
         super().__init__()
         self.dataset_dir = dataset_dir
+        self.batch_sz = batch_sz
         self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
-    def train_dataloader(self, batch_size):
-        return DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
+    def train_dataloader(self):
+        return DataLoader(self.dataset, batch_size=self.batch_sz, shuffle=True)
     
-    def val_dataloader(self, batch_size):
-        return DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
+    def val_dataloader(self):
+        return DataLoader(self.dataset, batch_size=self.batch_sz, shuffle=True)
 
 
 if __name__ == "__main__":
