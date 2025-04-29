@@ -2,7 +2,6 @@
 Adapted from: https://github.com/LTH14/mar/blob/main/models/mar.py
 """
 
-from world_mar.modules.embeddings import pose_embedding, timestep_embedding
 from world_mar.modules.embeddings.rotary_embedding import RotaryEmbedding
 from functools import partial
 import numpy as np
@@ -74,7 +73,7 @@ class WorldMAR(pl.LightningModule):
             nn.ReLU(),
             nn.Linear(embedding_hidden_dim, st_embed_dim)
         )
-        self.timestep_embedder = TimestepEmbedder(hidden_size=st_embed_dim)
+        self.timestamp_embedder = TimestepEmbedder(hidden_size=st_embed_dim)
         self.action_embedder = nn.Sequential(
             nn.Linear(action_dim, embedding_hidden_dim),
             nn.ReLU(),
@@ -224,54 +223,76 @@ class WorldMAR(pl.LightningModule):
                              src=torch.ones(bsz, self.frame_seq_len, device=x.device))
         return mask, offsets # b hw, b
 
-    def add_global_embeddings(self, x, poses):
-        B, T, H, W, D  = x.shape
+    def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False)
+        B, T, H, W, D = x.shape
+
+        if is_decoder:
+            H -= 1  # encoder would have concatenated buffer onto x's H dim
+            
+        assert timestamps.shape == (B, T)
+
         # construct pose embeddings matching latent shape
         poses = poses[:, :, ::40, ::40, :]           # (B, T, H, W, 6)
         pose_embeddings = self.pose_embedder(poses)  # (B, T, H, W, D)
 
-        # construct timestep embeddings matching latent shape
-        timesteps = torch.arange(T).unsqueeze(0).expand((B, -1))                       # (B, T)
-        timesteps = rearrange(timesteps, "b t -> (b t)")                               # (BT)
-        timestep_embeddings = self.timestep_embedder(timesteps)                        # (BT, D)
-        timestep_embeddings = rearrange(timestep_embeddings, "(b t) d -> b t d", b=B)  # (B, T, D)
-        timestep_embeddings = timestep_embeddings.unsqueeze(2).unsqueeze(3)            # (B, T, 1, 1, D)
-        timestep_embeddings = timestep_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
+        # construct timestamp embeddings matching latent shape
+        timestamps = rearrange(timestamps, "b t -> (b t)")                               # (BT)
+        timestamp_embeddings = self.timestamp_embedder(timestamps)                       # (BT, D)
+        timestamp_embeddings = rearrange(timestamp_embeddings, "(b t) d -> b t d", b=B)  # (B, T, D)
+        timestamp_embeddings = timestamp_embeddings.unsqueeze(2).unsqueeze(3)            # (B, T, 1, 1, D)
+        timestamp_embeddings = timestamp_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
 
         # return the latent with the embeddings added
-        return x + pose_embeddings + timestep_embeddings  # (B, T, H, W, D)
+        x[:, :, :H, :, :] += pose_embeddings + timestamp_embeddings  # (B, T, H or H+1, W, D)
+        return x
 
-    def concat_token_buffers(self, x, actions):
+    def add_pred_action_and_ctx_embeddings(self, x, actions, is_decoder=False):
         B, T, H, W, D = x.shape
+
+        if is_decoder:
+            H -= 1  # encoder would have concatenated buffer onto x's H dim
+
+        assert actions.shape == (B, 25)
+
         # calculate action tokens
         action_embeddings = self.action_embedder(actions)  # (B, D)
+
         # tokens: expected to be d-dimensional vectors
         pred_token_buffer = self.pred_token.view(1, 1, 1, 1, D).repeat(B, 1, 1, W, 1)      # (B, 1, 1, W, D)
         action_token_buffer = action_embeddings.view(B, 1, 1, 1, D).repeat(1, 1, 1, W, 1)  # (B, 1, 1, W, D)
         ctx_token_buffer = self.ctx_token.view(1, 1, 1, 1, D).repeat(B, T-2, 1, W, 1)      # (B, T-2, 1, W, D)
-        # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim) 
-        # concat [ACTION] token buffer to x[:, 1] (second elements along temporal dim)
-        # concat [CTX] token buffer to x[:, 2:] (third, fourth, fifth, ... elements along temporal dim)
-        # these concatenations are happening along H, the height dimension (could've been W equivalently)
-        out = torch.cat([
-            torch.cat([x[:, 0:1], pred_token_buffer], dim=-3),
-            torch.cat([x[:, 1:2], action_token_buffer], dim=-3),
-            torch.cat([x[:, 2:], ctx_token_buffer], dim=-3)
-        ], dim=-4)  # dim=-3 is H and dim=-4 is T
-        return out
 
-    def forward_encoder(self, x, actions, poses, s_attn_mask=None, t_attn_mask=None):
+        if not is_decoder:
+            # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim) 
+            # concat [ACTION] token buffer to x[:, 1] (second elements along temporal dim)
+            # concat [CTX] token buffer to x[:, 2:] (third, fourth, fifth, ... elements along temporal dim)
+            # these concatenations are happening along H, the height dimension (could've been W equivalently)
+            x = torch.cat([
+                torch.cat([x[:, 0:1], pred_token_buffer], dim=-3),
+                torch.cat([x[:, 1:2], action_token_buffer], dim=-3),
+                torch.cat([x[:, 2:], ctx_token_buffer], dim=-3)
+            ], dim=-4)  # dim=-3 is H and dim=-4 is T
+        else:
+            # add [PRED] tokens to x[:, 0, H:, :, :] (extra buffer for first elements along temporal dim) 
+            # add [ACTION] tokens to x[:, 1, H:, :, :] (extra buffer for second elements along temporal dim)
+            # add [CTX] tokens to x[:, 2:, H:, :, :] (extra buffer for third, fourth, fifth, ... elements along temporal dim)
+            tokens = torch.cat([pred_token_buffer, action_token_buffer, ctx_token_buffer], dim=-4)  # (B, T, 1, W, D)
+            x[:, :, H:, :, :] += tokens  # (B, T, H+1, W, D)
+
+        return x  # (B, T, H+1, W, D)
+
+    def forward_encoder(self, x, actions, poses, timestamps, s_attn_mask=None, t_attn_mask=None):
         # x:       (B, T, H, W, token_embed_dim)
         # actions: (B, 25)
         # poses:   (B, T, 40H, 40W, 6)
         # TODO: double check this actually does across last dim
         x = self.z_proj(x)  # (B, T, H, W, D)
 
-        # add pose and timestep embeddings
-        x = self.add_global_embeddings(x, poses)  # (B, T, H, W, D)
+        # add pose and timestamp embeddings
+        x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps)  # (B, T, H, W, D)
 
         # add token buffers for prediction, action (on prev frame), and context (on memory frames)
-        x = self.concat_token_buffers(x, actions)  # (B, T, H+1, W, D)
+        x = self.add_pred_action_and_ctx_embeddings(x, actions)  # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         # TODO: double check this actually does across last dim
@@ -284,25 +305,35 @@ class WorldMAR(pl.LightningModule):
 
         return x  # (B, T, H+1, W, D)
 
+    def forward_decoder(self, x, actions, poses, timestamps, mask, offsets, s_attn_mask=None, t_attn_mask=None):
+        # x:       (B, T, H+1, W, D) 
+        # mask:    (B, HW)
+        # offsets: (B)
+        B, T, H, W, D = x.shape
+        H -= 1  # encoder would have concatenated token buffer onto x's H dim
 
-    def forward_decoder(self, x, actions, poses, mask, offsets, s_attn_mask=None, t_attn_mask=None):
-        # x: (B, T, H, W, ) 
-        # mask: b hw
-        # offsets: b
-        b, t, h, w, d = x.shape
-
-        s_mask = mask.view(b, 1, h, w)
-        t_mask = (torch.arange(t, device=self.device).unsqueeze(0) == offsets.unsqueeze(1)).view(b, t, 1, 1)
+        # convert mask and offsets into separate space and time masks
+        s_mask = mask.view(B, 1, H, W)
+        t_mask = (torch.arange(T, device=self.device).unsqueeze(0) == offsets.unsqueeze(1)).view(B, T, 1, 1)
         full_mask = s_mask & t_mask
-        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)
+        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)  # (B, T, H+1, W, D)
 
-        # TODO: add embs based on pos (RoPE), actions, poses, want:
-        #       x_i + E_i, Ei = E_ai + E_pi
-        # THESE SHOULD BE DIFF FROM THE ENCODER ONES
-        x = ...
+        # add pose and timestamp embeddings
+        x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps, is_decoder=True)  # (B, T, H+1, W, D)
+
+        # re-add [PRED], [ACTION], and [CTX] tokens to the token buffers
+        x = self.add_pred_action_and_ctx_embeddings(x, actions, is_decoder=True)  # (B, T, H+1, W, D)
+
+        # pass through each decoder spatio-temporal attention block
         for block in self.decoder_blocks:
             x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
+
         x = self.decoder_norm(x)
+
+        # remove the extra token buffer that was concatenated by the encoder onto x's H dim
+        x = x[:, :, :H, :, :]
+
+        return x  # (B, T, H, W, D)
     
     def forward_diffusion(self, z, tgt, mask):
         tgt = rearrange(tgt, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1)
@@ -390,7 +421,6 @@ class WorldMAR(pl.LightningModule):
         actions = batch["actions"].to(self.device) # shape [B, 25]
         poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
         timestamps = batch["timestamps"].to(self.device) # shape [B, T]
-
 
         # --- construct attn_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
