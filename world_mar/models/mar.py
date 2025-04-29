@@ -125,12 +125,11 @@ class WorldMAR(pl.LightningModule):
         self.num_frames = num_frames
     
     def initialize_weights(self):
-        torch.nn.init.normal_(self.pred_token, std=.02)
-        torch.nn.init.normal_(self.prev_token, std=.02)
-        torch.nn.init.normal_(self.ctx_token, std=.02)
-        torch.nn.init.normal_(self.mask_token, std=.02)
-        torch.nn.init.normal_(self.diffusion_pos_emb_learned, std=.02)
-
+        torch.nn.init.kaiming_normal_(self.pred_token)
+        torch.nn.init.kaiming_normal_(self.prev_token)
+        torch.nn.init.kaiming_normal_(self.ctx_token)
+        torch.nn.init.kaiming_normal_(self.mask_token)
+        torch.nn.init.kaiming_normal_(self.diffusion_pos_emb_learned)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -217,7 +216,7 @@ class WorldMAR(pl.LightningModule):
         # x : expected to be b t h w d
         # TODO: double check this actually does across last dim
         x = self.z_proj(x)
-        bsz, _, embed_dim = x.shape
+        bsz, _,  = x.shape
 
         # TODO: add embs based on pos, actions, poses, want:
         #       x_i + E_i, Ei = E_ai + E_pi
@@ -265,9 +264,10 @@ class WorldMAR(pl.LightningModule):
         valid_hw = torch.ones(b, t, h*w)
         if padding_mask is not None:
             valid_hw &= padding_mask.unsqueeze(-1)
-        s_attn_mask_dec = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
+        valid_hw = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
+        s_attn_mask_dec = valid_hw
         
-        valid_hw[batch_idx, offsets] = mask
+        valid_hw[batch_idx, offsets] = ~mask
         s_attn_mask_enc = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
         s_attn_mask_enc = rearrange(s_attn_mask_enc, "b t hw hw -> (b t) hw hw")
 
@@ -275,7 +275,8 @@ class WorldMAR(pl.LightningModule):
         valid_t = torch.ones(b, h*w, t, dtype=torch.bool, device=self.device)
         if padding_mask is not None:
             valid_t &= padding_mask.unsqueeze(1)
-        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
+        valid_t = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
+        t_attn_mask_dec = valid_t
 
         valid_t[batch_idx, mask, offsets] = False
         
@@ -397,11 +398,12 @@ class WorldMAR(pl.LightningModule):
 
         # --- parse batch ---
         # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
-        frames = batch["frames"].to(self.device) # shape [B, T, H, W, C] # TODO: align with dataloader permutation
+        frames = batch["frames"].to(self.device) # shape [B, T, H, W, C]
         batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
         actions = batch["actions"].to(self.device) # shape [B, 25]
         poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
         timestamps = batch["timestamps"].to(self.device) # shape [B, T]
+
 
         # --- construct attn_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
