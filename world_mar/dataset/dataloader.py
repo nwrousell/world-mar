@@ -307,7 +307,6 @@ class MinecraftDataset(Dataset):
 
 
         action_matrix = torch.stack(action_vectors)
-        print(action_matrix[:, [15,16]][:30])
         pose_matrix = torch.stack(pose_vectors, axis=0)
 
         return { "action_matrix": action_matrix, "pose_matrix": pose_matrix, "is_gui_open": is_gui_open, "mouse_pos": mouse_pos }
