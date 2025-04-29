@@ -181,7 +181,7 @@ def env_action_to_vector(action):
     return torch.tensor(vector, dtype=torch.float32)
 
 
-def one_hot_actions(actions: Sequence[Mapping[str, int]]) -> torch.Tensor:
+def one_hot_actions(actions):
     actions_one_hot = torch.zeros(len(actions), len(ACTION_KEYS))
     for i, current_actions in enumerate(actions):
         for j, action_key in enumerate(ACTION_KEYS):
