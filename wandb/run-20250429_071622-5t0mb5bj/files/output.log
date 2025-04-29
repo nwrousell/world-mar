@@ -1,0 +1,91 @@
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+
+   | Name                         | Type             | Params | Mode
+---------------------------------------------------------------------------
+0  | pose_embedder                | Sequential       | 33.9 K | train
+1  | timestamp_embedder           | TimestepEmbedder | 131 K  | train
+2  | action_embedder              | Sequential       | 36.4 K | train
+3  | enc_spatial_rotary_embedder  | RotaryEmbedding  | 8      | train
+4  | enc_temporal_rotary_embedder | RotaryEmbedding  | 16     | train
+5  | dec_spatial_rotary_embedder  | RotaryEmbedding  | 8      | train
+6  | dec_temporal_rotary_embedder | RotaryEmbedding  | 16     | train
+7  | z_proj                       | Linear           | 16.6 K | train
+8  | z_proj_ln                    | LayerNorm        | 512    | train
+9  | encoder_blocks               | ModuleList       | 12.6 M | train
+10 | encoder_norm                 | LayerNorm        | 512    | train
+11 | decoder_blocks               | ModuleList       | 12.6 M | train
+12 | decoder_norm                 | LayerNorm        | 512    | train
+13 | diffloss                     | DiffLoss         | 1.4 M  | train
+14 | vae                          | AutoencoderKL    | 229 M  | train
+   | other params                 | n/a              | 37.6 K | n/a
+---------------------------------------------------------------------------
+26.9 M    Trainable params
+229 M     Non-trainable params
+256 M     Total params
+1,024.474 Total estimated model params size (MB)
+711       Modules in train mode
+0         Modules in eval mode
+/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:425: The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=29` in the `DataLoader` to improve performance.
+Epoch 0:   0%|                                                                                                                                                                                                                                                                    | 0/21359 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/ubuntu/world-mar/train.py", line 126, in <module>
+    main(args)
+  File "/home/ubuntu/world-mar/train.py", line 91, in main
+    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 561, in fit
+    call._call_and_handle_interrupt(
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/call.py", line 48, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 599, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 1012, in _run
+    results = self._run_stage()
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/trainer.py", line 1056, in _run_stage
+    self.fit_loop.run()
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/fit_loop.py", line 216, in run
+    self.advance()
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/fit_loop.py", line 455, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 150, in run
+    self.advance(data_fetcher)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 322, in advance
+    batch_output = self.manual_optimization.run(kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/optimization/manual.py", line 94, in run
+    self.advance(kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/loops/optimization/manual.py", line 114, in advance
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/trainer/call.py", line 328, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/pytorch_lightning/strategies/strategy.py", line 391, in training_step
+    return self.lightning_module.training_step(*args, **kwargs)
+  File "/home/ubuntu/world-mar/world_mar/models/mar.py", line 442, in training_step
+    loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/world-mar/world_mar/models/mar.py", line 407, in forward
+    x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
+  File "/home/ubuntu/world-mar/world_mar/models/mar.py", line 304, in forward_encoder
+    x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/world-mar/world_mar/modules/attention.py", line 77, in forward
+    x = x + self.s_mlp(self.s_norm2(x))
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/timm/layers/mlp.py", line 46, in forward
+    x = self.drop1(x)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/modules/dropout.py", line 70, in forward
+    return F.dropout(input, self.p, self.training, self.inplace)
+  File "/home/ubuntu/miniconda3/envs/world-mar/lib/python3.9/site-packages/torch/nn/functional.py", line 1425, in dropout
+    _VF.dropout_(input, p, training) if inplace else _VF.dropout(input, p, training)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 200.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 71.38 MiB is free. Including non-PyTorch memory, this process has 39.42 GiB memory in use. Of the allocated memory 38.37 GiB is allocated by PyTorch, and 565.42 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

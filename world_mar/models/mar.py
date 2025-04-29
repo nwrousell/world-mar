@@ -440,7 +440,7 @@ class WorldMAR(pl.LightningModule):
 
         # --- forward + backprop ---
         loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
-        self.log("train_loss", loss)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         self.manual_backward(loss)
 
         opt.step()
