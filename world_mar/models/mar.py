@@ -374,7 +374,7 @@ class WorldMAR(pl.LightningModule):
         t_attn_mask_enc = rearrange(t_attn_mask_enc, "b hw t t -> (b hw) t t")
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
-    
+
     def forward(self, frames, actions, poses, timestamps, padding_mask=None):
         # TODO: fill this out more detail
 
@@ -412,7 +412,6 @@ class WorldMAR(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx):
-        # TODO: parse batch, whether dict or tuple (MOVE TO DEVICE)
         opt = self.optimizers()
         lr_sched = self.lr_schedulers()
         opt.zero_grad()
@@ -451,6 +450,38 @@ class WorldMAR(pl.LightningModule):
                 "frequency": 1,
             }
         }
+
+    def sample(self, frames, actions, poses, timestamps):
+        b = frames.shape[0]
+
+        # 1) compress frames w/ vae
+        x = rearrange(frames, "b t h w c -> (b t) c h w")
+        x = self.vae.encode(frames).sample() # (b t) (h w) d
+        x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
+        x = rearrange(x, "(b t) h w d -> b t h w d", b=b)
+        x_gt = x.clone().detach()
+
+        # 2) gen mask
+        orders = self.sample_orders(b)
+        mask, offsets = self.random_masking(x, orders) # b hw, b
+
+        # 3) construct attn_masks
+        (s_attn_mask_enc, t_attn_mask_enc, 
+         s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, mask, offsets, padding_mask=padding_mask)
+
+        # 4) run encoder
+        x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
+
+        # 5) run decoder
+        z = self.forward_decoder(x, actions, poses, timestamps, mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        # z : b t h w d
+
+        # 6) split into tgt frame + diffuse
+        batch_idx = torch.arange(b, device=self.device)
+        z_t = x[batch_idx, offsets] # b h w d
+        xt_gt = x_gt[batch_idx, offsets] # b h w d
+        
+        
 
     # def sample_tokens(self, bsz, num_iter=64, labels=None, temperature=1.0, progress=False):
 
