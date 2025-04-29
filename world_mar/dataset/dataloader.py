@@ -236,6 +236,7 @@ class MinecraftDataset(Dataset):
         cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
         if os.path.exists(cache_path):
             d = torch.load(cache_path)
+            print(f"loaded metadata from {cache_path}")
             self.demo_to_start_frame = d["demo_to_start_frame"]
             self.demo_to_metadata = d["demo_to_metadata"]
         else:
