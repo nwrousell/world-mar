@@ -90,3 +90,6 @@ data
 
 # DS Store
 **/*.DS_store
+
+logs/
+wandb/
