@@ -16,6 +16,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from world_mar.modules.utils import instantiate_from_config
+from world_mar.dataset.dataloader import MinecraftDataModule
 
 LOG_PARENT = "logs"
 
@@ -62,7 +63,7 @@ def main(args):
         ckpt_path = find_latest_checkpoint(args.resume)
 
     # more shenanigans...
-    train_data = ... # TODO: @noah make this a lightning dataloader    
+    train_data = MinecraftModule (dataset_dir=args.data_dir) # TODO: @noah make this a lightning dataloader    
 
     # load model
     model_cfg = cfg.model
@@ -89,29 +90,6 @@ def main(args):
 
     trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path, logger=WandbLogger(project="WorldMar", log_model="all"))
 
-    # dataloader = ...
-    # vae = ...
-    # model = ...
-    # optimizer = ...
-
-    # for batch in dataloader:
-    #     optimizer.zero_grad()
-        
-    #     # dataloader has already sampled context frames with high overlap and made poses relative
-    #     frame_to_pred, context_frames, context_relative_poses, actions = batch
-
-    #     all_frames = [frame_to_pred, context_frames] # stack these correctly
-    #     latents = vae.encode(all_frames)
-    #     context_latents, latent_to_pred = latents[0], latents[1:] # fix this
-
-    #     pred_latent = model(context_latents, context_relative_poses, actions) # does ROPE and action embedding
-
-    #     loss = diff_loss(pred_latent, latent_to_pred)
-    #     loss.backward()
-
-    #     optimizer.step()
-
-
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument(
@@ -133,6 +111,13 @@ if __name__ == '__main__':
         default="",
         type=str,
         help="path to previous run's logdir"
+    )
+    parser.add_argument(
+        "-d",
+        "--data-dir",
+        default="",
+        type=str,
+        help="path to data directory"
     )
    # ... add more here
     
