@@ -402,10 +402,10 @@ class MinecraftDataModule(L.LightningDataModule):
         self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
     def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_sz, shuffle=True)
+        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=16, shuffle=True)
     
     def val_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_sz, shuffle=True)
+        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=16, shuffle=True)
 
 
 if __name__ == "__main__":
