@@ -346,9 +346,12 @@ class WorldMAR(pl.LightningModule):
     def construct_attn_masks(self, x, mask, offsets, padding_mask=None):
         b, t, h, w, d = x.shape
         batch_idx = torch.arange(b, device=self.device)
+        mask = rearrange(mask, "b (h w) -> b h w", h=h)
+        mask = torch.cat([mask, torch.zeros(b,1,w, device=self.device)], dim=2)
+        mask = rearrange(mask, "b h w -> b (h w)")
 
         # --- spatial attn mask ---
-        valid_hw = torch.ones(b, t, h*w)
+        valid_hw = torch.ones(b, t, (h+1)*w)
         if padding_mask is not None:
             valid_hw &= padding_mask.unsqueeze(-1)
         valid_hw = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
@@ -359,7 +362,7 @@ class WorldMAR(pl.LightningModule):
         s_attn_mask_enc = rearrange(s_attn_mask_enc, "b t hw hw -> (b t) hw hw")
 
         # --- temporal attn mask ---
-        valid_t = torch.ones(b, h*w, t, dtype=torch.bool, device=self.device)
+        valid_t = torch.ones(b, (h+1)*w, t, dtype=torch.bool, device=self.device)
         if padding_mask is not None:
             valid_t &= padding_mask.unsqueeze(1)
         valid_t = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
@@ -372,7 +375,7 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
     
-    def forward(self, frames, actions, poses, padding_mask=None):
+    def forward(self, frames, actions, poses, timestamps, padding_mask=None):
         # TODO: fill this out more detail
 
         b = frames.shape[0]
@@ -393,10 +396,10 @@ class WorldMAR(pl.LightningModule):
          s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, mask, offsets, padding_mask=padding_mask)
 
         # 4) run encoder
-        x = self.forward_encoder(x, actions, poses, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
+        x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
 
         # 5) run decoder
-        z = self.forward_decoder(x, actions, poses, mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        z = self.forward_decoder(x, actions, poses, timestamps, mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
         # 6) split into tgt frame + diffuse
@@ -422,14 +425,14 @@ class WorldMAR(pl.LightningModule):
         poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
         timestamps = batch["timestamps"].to(self.device) # shape [B, T]
 
-        # --- construct attn_mask ---
+        # --- construct padding_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
         # assert not torch.any(batch_nframes > self.num_frames)
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
         # --- forward + backprop ---
-        loss = self(frames, actions, poses, padding_mask=padding_mask)
+        loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
         self.log("train_loss", loss)
         self.manual_backward(loss)
 
