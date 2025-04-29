@@ -63,7 +63,7 @@ def main(args):
         ckpt_path = find_latest_checkpoint(args.resume)
 
     # more shenanigans...
-    train_data = MinecraftModule (dataset_dir=args.data_dir) # TODO: @noah make this a lightning dataloader    
+    train_data = MinecraftDataModule(dataset_dir=args.data_dir)
 
     # load model
     model_cfg = cfg.model
