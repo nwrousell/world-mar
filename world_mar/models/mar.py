@@ -42,83 +42,84 @@ class WorldMAR(pl.LightningModule):
         - vae: thing that has an encode and decode
 
     """
-    def __init__(self, 
-                 vae_config, # should be an AutoencoderKL 
-                 img_height=360, img_width=640, num_frames=5,
-                 patch_size=2, token_embed_dim=16,
-                 vae_seq_h=32, vae_seq_w=18,
-                 encoder_embed_dim=512, encoder_depth=16, encoder_num_heads=16,
-                 decoder_embed_dim=512, decoder_depth=16, decoder_num_heads=16,
-                 diffloss_w=512, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
-                 mask_ratio_min=0.7,
-                 proj_dropout=0.1,
-                 attn_dropout=0.1,
-                 warmup_steps=10000, # TODO: change this depending on dataset size
-                 **kwargs
+    def __init__(
+        self, 
+        vae_config, # should be an AutoencoderKL 
+        img_height=360, img_width=640, num_frames=5,
+        patch_size=2, token_embed_dim=16,
+        vae_seq_h=32, vae_seq_w=18,
+        st_embed_dim=512,
+        encoder_depth=16, encoder_num_heads=16,
+        decoder_depth=16, decoder_num_heads=16,
+        diffloss_w=512, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
+        mask_ratio_min=0.7,
+        proj_dropout=0.1,
+        attn_dropout=0.1,
+        warmup_steps=10000, # TODO: change this depending on dataset size
+        **kwargs
     ):
         super().__init__()
         self.automatic_optimization = False
+        plucker_dim = 6
+        action_dim = 25
+        embedding_hidden_dim = 128
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
         self.mask_ratio_gen = stats.truncnorm((mask_ratio_min -1.0) / 0.25, 0, loc=1.0, scale=0.25)
 
-        # ----- Encoder -----
+        # ----- global embeddings -----
+        self.pose_embedder = nn.Sequential(
+            nn.Linear(plucker_dim, embedding_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_hidden_dim, st_embed_dim)
+        )
+        self.timestep_embedder = TimestepEmbedder(hidden_size=st_embed_dim)
+        self.action_embedder = nn.Sequential(
+            nn.Linear(action_dim, embedding_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_hidden_dim, st_embed_dim)
+        )
+
+        # ----- local RoPE embeddings -----
+        self.enc_spatial_rotary_embedder = RotaryEmbedding(dim=st_embed_dim // encoder_num_heads // 2, freqs_for="pixel", max_freq=256)
+        self.enc_temporal_rotary_embedder = RotaryEmbedding(dim=st_embed_dim // encoder_num_heads)
+        self.dec_spatial_rotary_embedder = RotaryEmbedding(dim=st_embed_dim // decoder_num_heads // 2, freqs_for="pixel", max_freq=256)
+        self.dec_temporal_rotary_embedder = RotaryEmbedding(dim=st_embed_dim // decoder_num_heads)
+
+        # ----- encoder -----
         # initial projection
         self.patch_size = patch_size
         self.token_embed_dim = token_embed_dim * patch_size**2
-        self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True) # projs VAE latents to transformer dim
-        self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
+        self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
+        self.z_proj_ln = nn.LayerNorm(st_embed_dim, eps=1e-6)
         # special tokens [PRED] and [CTX]
-        self.pred_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
-        self.ctx_token = nn.Parameter(torch.zeros(1, vae_seq_w, encoder_embed_dim))
-        # small networks to process pose, action, and timestep embeddings
-        plucker_dim = 6
-        action_dim = 25
-        hidden_dim = 128
-        self.pose_embedder = nn.Sequential(
-            nn.Linear(plucker_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, encoder_embed_dim)
-        )
-        self.timestep_embedder = TimestepEmbedder(hidden_size=encoder_embed_dim)
-        self.action_embedder = nn.Sequential(
-            nn.Linear(action_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, encoder_embed_dim)
-        )
-        # RoPE rotary embeddings for encoder blocks along spatial and temporal dimensions
-        self.enc_spatial_rotary_emb = RotaryEmbedding(dim=encoder_embed_dim // encoder_num_heads // 2, freqs_for="pixel", max_freq=256)
-        self.enc_temporal_rotary_emb = RotaryEmbedding(dim=encoder_embed_dim // encoder_num_heads)
+        self.pred_token = nn.Parameter(torch.zeros(1, vae_seq_w, st_embed_dim))
+        self.ctx_token = nn.Parameter(torch.zeros(1, vae_seq_w, st_embed_dim))
         # encoder spatio-temporal attention blocks
         self.encoder_blocks = nn.ModuleList([
             STBlock(
-                encoder_embed_dim, encoder_num_heads, qkv_bias=True,
+                st_embed_dim, encoder_num_heads, qkv_bias=True,
                 proj_drop=proj_dropout, attn_drop=attn_dropout,
                 spatial_rotary_emb=self.enc_spatial_rotary_emb,
                 temporal_rotary_emb=self.enc_temporal_rotary_emb
             ) for _ in range(encoder_depth)])
         # layer normalization
-        self.encoder_norm = nn.LayerNorm(encoder_embed_dim)
+        self.encoder_norm = nn.LayerNorm(st_embed_dim)
 
-        # ----- Decoder -----
-        # initial projection
-        self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
+        # ----- decoder -----
         # special token [MASK] for selected tokens that decoder should in-paint
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
-        # RoPE rotary embeddings for encoder blocks along spatial and temporal dimensions
-        self.dec_spatial_rotary_emb = RotaryEmbedding(dim=decoder_embed_dim // decoder_num_heads // 2, freqs_for="pixel", max_freq=256)
-        self.dec_temporal_rotary_emb = RotaryEmbedding(dim=decoder_embed_dim // decoder_num_heads)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, st_embed_dim))
         # decoder spatio-temporal attention blocks
         self.decoder_blocks = nn.ModuleList([
             STBlock(
-                decoder_embed_dim, decoder_num_heads, qkv_bias=True,
+                st_embed_dim, decoder_num_heads, qkv_bias=True,
                 proj_drop=proj_dropout, attn_drop=attn_dropout, 
                 spatial_rotary_emb=self.dec_spatial_rotary_emb, 
                 temporal_rotary_emb=self.dec_temporal_rotary_emb
             ) for _ in range(decoder_depth)])
         # layer normalization
-        self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
+        self.decoder_norm = nn.LayerNorm(st_embed_dim)
 
         # ----- pose prediction -----
         # TODO: add pose prediction network, throw into training
@@ -131,7 +132,7 @@ class WorldMAR(pl.LightningModule):
         #       for now, assuming more lightweight MLP
         self.diffloss = DiffLoss(
             target_channels=self.token_embed_dim,
-            z_channels=decoder_embed_dim,
+            z_channels=st_embed_dim,
             width=diffloss_w,
             depth=diffloss_d,
             num_sampling_steps=num_sampling_steps
@@ -148,7 +149,7 @@ class WorldMAR(pl.LightningModule):
         self.seq_h, self.seq_w = self.vae.seq_h // patch_size, self.vae.seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
         # we assume here the diffusion model operates one frame at a time:
-        self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.seq_h, self.seq_w, decoder_embed_dim))
+        self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.seq_h, self.seq_w, st_embed_dim))
         self.num_frames = num_frames
     
     def initialize_weights(self):
@@ -223,7 +224,24 @@ class WorldMAR(pl.LightningModule):
                              src=torch.ones(bsz, self.frame_seq_len, device=x.device))
         return mask, offsets # b hw, b
 
-    def add_token_buffers(self, x, actions):
+    def add_global_embeddings(self, x, poses):
+        B, T, H, W, D  = x.shape
+        # construct pose embeddings matching latent shape
+        poses = poses[:, :, ::40, ::40, :]           # (B, T, H, W, 6)
+        pose_embeddings = self.pose_embedder(poses)  # (B, T, H, W, D)
+
+        # construct timestep embeddings matching latent shape
+        timesteps = torch.arange(T).unsqueeze(0).expand((B, -1))                       # (B, T)
+        timesteps = rearrange(timesteps, "b t -> (b t)")                               # (BT)
+        timestep_embeddings = self.timestep_embedder(timesteps)                        # (BT, D)
+        timestep_embeddings = rearrange(timestep_embeddings, "(b t) d -> b t d", b=B)  # (B, T, D)
+        timestep_embeddings = timestep_embeddings.unsqueeze(2).unsqueeze(3)            # (B, T, 1, 1, D)
+        timestep_embeddings = timestep_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
+
+        # return the latent with the embeddings added
+        return x + pose_embeddings + timestep_embeddings  # (B, T, H, W, D)
+
+    def concat_token_buffers(self, x, actions):
         B, T, H, W, D = x.shape
         # calculate action tokens
         action_embeddings = self.action_embedder(actions)  # (B, D)
@@ -248,35 +266,27 @@ class WorldMAR(pl.LightningModule):
         # poses:   (B, T, 40H, 40W, 6)
         # TODO: double check this actually does across last dim
         x = self.z_proj(x)  # (B, T, H, W, D)
-        B, T, H, W, D  = x.shape
 
         # add pose and timestep embeddings
-        poses = poses[:, :, ::40, ::40, :]           # (B, T, H, W, 6)
-        pose_embeddings = self.pose_embedder(poses)  # (B, T, H, W, D)
-
-        timesteps = torch.arange(T).unsqueeze(0).expand((B, -1))                       # (B, T)
-        timesteps = rearrange(timesteps, "b t -> (b t)")                               # (BT)
-        timestep_embeddings = self.timestep_embedder(timesteps)                        # (BT, D)
-        timestep_embeddings = rearrange(timestep_embeddings, "(b t) d -> b t d", b=B)  # (B, T, D)
-        timestep_embeddings = timestep_embeddings.unsqueeze(2).unsqueeze(3)            # (B, T, 1, 1, D)
-        timestep_embeddings = timestep_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
-
-        x += pose_embeddings + timestep_embeddings  # (B, T, H, W, D)
+        x = self.add_global_embeddings(x, poses)  # (B, T, H, W, D)
 
         # add token buffers for prediction, action (on prev frame), and context (on memory frames)
-        x = self.add_token_buffers(x, actions)  # (B, T, H+1, W, D)
+        x = self.concat_token_buffers(x, actions)  # (B, T, H+1, W, D)
 
+        # pass through each encoder spatio-temporal attention block
         # TODO: double check this actually does across last dim
         x = self.z_proj_ln(x)
 
         for block in self.encoder_blocks:
             x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
-        x = self.encoder_norm(x)
 
-        return x
+        x = self.encoder_norm(x) 
+
+        return x  # (B, T, H+1, W, D)
+
 
     def forward_decoder(self, x, actions, poses, mask, offsets, s_attn_mask=None, t_attn_mask=None):
-        # x : expected to be b t h w d
+        # x: (B, T, H, W, ) 
         # mask: b hw
         # offsets: b
         b, t, h, w, d = x.shape
