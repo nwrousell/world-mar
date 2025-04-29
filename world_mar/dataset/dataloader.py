@@ -84,6 +84,33 @@ NOOP_ACTION = {
     "pickItem": 0,
 }
 
+ACTION_KEYS = [
+    "inventory",
+    "ESC",
+    "hotbar.1",
+    "hotbar.2",
+    "hotbar.3",
+    "hotbar.4",
+    "hotbar.5",
+    "hotbar.6",
+    "hotbar.7",
+    "hotbar.8",
+    "hotbar.9",
+    "forward",
+    "back",
+    "left",
+    "right",
+    "cameraX",
+    "cameraY",
+    "jump",
+    "sneak",
+    "sprint",
+    "swapHands",
+    "attack",
+    "use",
+    "pickItem",
+    "drop",
+]
 
 # Matches a number in the MineRL Java code regarding sensitivity
 # This is for mapping from recorded sensitivity to the one used in the model
@@ -153,6 +180,30 @@ def env_action_to_vector(action):
     
     return torch.tensor(vector, dtype=torch.float32)
 
+
+def one_hot_actions(actions: Sequence[Mapping[str, int]]) -> torch.Tensor:
+    actions_one_hot = torch.zeros(len(actions), len(ACTION_KEYS))
+    for i, current_actions in enumerate(actions):
+        for j, action_key in enumerate(ACTION_KEYS):
+            if action_key.startswith("camera"):
+                if action_key == "cameraX":
+                    value = current_actions["camera"][0]
+                elif action_key == "cameraY":
+                    value = current_actions["camera"][1]
+                else:
+                    raise ValueError(f"Unknown camera action key: {action_key}")
+                max_val = 20
+                bin_size = 0.5
+                num_buckets = int(max_val / bin_size)
+                value = (value - num_buckets) / num_buckets
+                assert -1 - 1e-3 <= value <= 1 + 1e-3, f"Camera action value must be in [-1, 1], got {value}"
+            else:
+                value = current_actions[action_key]
+                assert 0 <= value <= 1, f"Action value must be in [0, 1] got {value}"
+            actions_one_hot[i, j] = value
+
+    return actions_one_hot
+
 def composite_images_with_alpha(image1, image2, alpha, x, y):
     """
     Draw image2 over image1 at location x,y, using alpha as the opacity for image2.
@@ -183,16 +234,26 @@ class MinecraftDataset(Dataset):
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
 
-        # construct demo_id -> start_frame map
-        self.demo_to_start_frame = dict()
-        self.demo_to_metadata = {}
-        current_frame = 0
-        for demo_id in self.unique_ids:
-            self.demo_to_start_frame[demo_id] = current_frame
-            current_frame += self.demo_to_num_frames[demo_id]
+        # construct demo_id -> start_frame map (or grab from cache)
+        cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
+        if os.path.exists(cache_path):
+            d = torch.load(cache_path)
+            self.demo_to_start_frame = d["demo_to_start_frame"]
+            self.demo_to_metadata = d["demo_to_metadata"]
+        else:
+            self.demo_to_start_frame = {}
+            self.demo_to_metadata = {}
+            current_frame = 0
+            for demo_id in self.unique_ids:
+                self.demo_to_start_frame[demo_id] = current_frame
+                current_frame += self.demo_to_num_frames[demo_id]
 
-            # load all actions/poses into memory now and preprocess
-            self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
+                # load all actions/poses into memory now and preprocess
+                self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
+
+            d = {"demo_to_metadata": self.demo_to_metadata, "demo_to_start_frame": self.demo_to_start_frame}
+            torch.save(d, cache_path)
+            print(f"wrote metadata to {cache_path}")
 
         # prepare cursor image
         self.cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
@@ -234,7 +295,7 @@ class MinecraftDataset(Dataset):
                 action["hotbar.{}".format(current_hotbar + 1)] = 1
             last_hotbar = current_hotbar
 
-            action_vectors.append(env_action_to_vector(action))
+            action_vectors.append(one_hot_actions(action))
 
             pose_vector = torch.tensor([step_data["xpos"], step_data["ypos"], step_data["zpos"], step_data["pitch"], step_data["yaw"]])
             pose_vectors.append(pose_vector)
