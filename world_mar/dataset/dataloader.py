@@ -8,6 +8,8 @@ from time import time
 import random
 from multiprocessing import Process, Queue, Event
 
+from safetensors.torch import load_file, save_file
+
 from ..modules.pose_retrieval import get_most_relevant_poses_to_target, get_relative_pose, euler_to_camera_to_world_matrix, convert_to_plucker, generate_points_in_sphere
 
 import numpy as np
@@ -224,7 +226,7 @@ class MinecraftDataset(Dataset):
         # determine demonstration ids
         unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
         unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
-        self.unique_ids = sorted(unique_ids)
+        self.unique_ids = sorted(unique_ids)[:5]
 
         # read counts metadata
         with open(os.path.join(dataset_dir, "counts.json"), "rt") as f:
@@ -233,26 +235,26 @@ class MinecraftDataset(Dataset):
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
 
         # construct demo_id -> start_frame map (or grab from cache)
-        cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
-        if os.path.exists(cache_path):
-            d = torch.load(cache_path)
-            print(f"loaded metadata from {cache_path}")
-            self.demo_to_start_frame = d["demo_to_start_frame"]
-            self.demo_to_metadata = d["demo_to_metadata"]
-        else:
-            self.demo_to_start_frame = {}
-            self.demo_to_metadata = {}
-            current_frame = 0
-            for demo_id in self.unique_ids:
-                self.demo_to_start_frame[demo_id] = current_frame
-                current_frame += self.demo_to_num_frames[demo_id]
+        # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
+        # if os.path.exists(cache_path):
+        #     # d = torch.load(cache_path)
+        #     self.demo_to_start_frame = d["demo_to_start_frame"]
+        #     self.demo_to_metadata = d["demo_to_metadata"]
+        #     print(f"loaded metadata from {cache_path}")
+        # else:
+        self.demo_to_start_frame = {}
+        self.demo_to_metadata = {}
+        current_frame = 0
+        for demo_id in self.unique_ids:
+            self.demo_to_start_frame[demo_id] = current_frame
+            current_frame += self.demo_to_num_frames[demo_id]
 
-                # load all actions/poses into memory now and preprocess
-                self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
+            # load all actions/poses into memory now and preprocess
+            self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
 
-            d = {"demo_to_metadata": self.demo_to_metadata, "demo_to_start_frame": self.demo_to_start_frame}
-            torch.save(d, cache_path)
-            print(f"wrote metadata to {cache_path}")
+        d = {"demo_to_metadata": self.demo_to_metadata, "demo_to_start_frame": self.demo_to_start_frame}
+        # torch.save(d, cache_path)
+        # print(f"wrote metadata to {cache_path}")
 
         # prepare cursor image
         self.cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
