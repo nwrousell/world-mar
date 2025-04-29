@@ -223,7 +223,7 @@ class WorldMAR(pl.LightningModule):
                              src=torch.ones(bsz, self.frame_seq_len, device=x.device))
         return mask, offsets # b hw, b
 
-    def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False)
+    def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False):
         B, T, H, W, D = x.shape
 
         if is_decoder:
