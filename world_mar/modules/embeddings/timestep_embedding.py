@@ -1,3 +1,6 @@
+import torch
+import torch.nn as nn
+
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
