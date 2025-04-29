@@ -100,8 +100,7 @@ ACTION_KEYS = [
     "back",
     "left",
     "right",
-    "cameraX",
-    "cameraY",
+    "camera",
     "jump",
     "sneak",
     "sprint",
@@ -114,7 +113,9 @@ ACTION_KEYS = [
 
 # Matches a number in the MineRL Java code regarding sensitivity
 # This is for mapping from recorded sensitivity to the one used in the model
-CAMERA_SCALER = 360.0 / 2400.0
+# CAMERA_SCALER = 360.0 / 2400.0
+CAMERA_SCALER = 360.0 / (2400.0 * 6) # 3 added by Noah to normalize mouse_dx * CAMERA_SCALER between -1 and 1
+
 
 def resize_image(img, target_resolution):
     # For your sanity, do not resize with any function than INTER_LINEAR
@@ -168,18 +169,15 @@ def json_action_to_env_action(json_action):
 
     return env_action, is_null_action
 
-def env_action_to_vector(action):
-    keys = NOOP_ACTION.keys()
-    
+def env_action_to_vector(action):    
     vector = []
-    for key in keys:
+    for key in ACTION_KEYS:
         if key == 'camera':
-            vector.extend(action[key])  # extend with both pitch and yaw
+            vector.extend(action[key] * CAMERA_SCALER)  # extend with both pitch and yaw
         else:
             vector.append(action[key])
     
     return torch.tensor(vector, dtype=torch.float32)
-
 
 def one_hot_actions(actions):
     actions_one_hot = torch.zeros(len(actions), len(ACTION_KEYS))
@@ -196,6 +194,7 @@ def one_hot_actions(actions):
                 bin_size = 0.5
                 num_buckets = int(max_val / bin_size)
                 value = (value - num_buckets) / num_buckets
+                print(value)
                 assert -1 - 1e-3 <= value <= 1 + 1e-3, f"Camera action value must be in [-1, 1], got {value}"
             else:
                 value = current_actions[action_key]
@@ -274,6 +273,7 @@ class MinecraftDataset(Dataset):
         mouse_pos = []
         last_hotbar = 0
         attack_is_stuck = False
+        max_dx = 0
         for i, step_data in enumerate(raw_metadata):
             if i == 0:
                 # Check if attack will be stuck down
@@ -294,8 +294,10 @@ class MinecraftDataset(Dataset):
             if current_hotbar != last_hotbar:
                 action["hotbar.{}".format(current_hotbar + 1)] = 1
             last_hotbar = current_hotbar
+            if abs(step_data["mouse"]["dx"]) > max_dx:
+                max_dx = abs(step_data["mouse"]["dx"])
 
-            action_vectors.append(one_hot_actions(action))
+            action_vectors.append(env_action_to_vector(action))
 
             pose_vector = torch.tensor([step_data["xpos"], step_data["ypos"], step_data["zpos"], step_data["pitch"], step_data["yaw"]])
             pose_vectors.append(pose_vector)
@@ -304,7 +306,8 @@ class MinecraftDataset(Dataset):
             mouse_pos.append(step_data["mouse"])
 
 
-        action_matrix = torch.stack(action_vectors, axis=0)
+        action_matrix = torch.stack(action_vectors)
+        print(action_matrix[:, [15,16]][:30])
         pose_matrix = torch.stack(pose_vectors, axis=0)
 
         return { "action_matrix": action_matrix, "pose_matrix": pose_matrix, "is_gui_open": is_gui_open, "mouse_pos": mouse_pos }
@@ -404,7 +407,7 @@ class MinecraftDataModule(L.LightningDataModule):
 
 
 if __name__ == "__main__":
-    dataset = MinecraftDataset(dataset_dir="../minecraft_seq")
+    dataset = MinecraftDataset(dataset_dir="./data")
     # dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4)
 
     for num_workers in [0, 2, 4, 8, 16]:
