@@ -405,7 +405,7 @@ class MinecraftDataModule(L.LightningDataModule):
 
 
 if __name__ == "__main__":
-    dataset = MinecraftDataset(dataset_dir="./data")
+    dataset = MinecraftDataset(dataset_dir="../minecraft_seq")
     # dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4)
 
     for num_workers in [0, 2, 4, 8, 16]:
