@@ -21,6 +21,15 @@ from world_mar.models.diffloss import DiffLoss
 import pytorch_lightning as pl
 
 
+def mask_by_order(mask_len, order, bsz, seq_len):
+    """
+    Returns a boolean mask where the *first* `mask_len` indices of `order`
+    are marked True. All others are False.
+    """
+    masking = torch.zeros(bsz, seq_len)
+    masking.scatter_(1, order[:, :mask_len.item()], True)  # in-place set
+    return masking
+
 class WorldMAR(pl.LightningModule):
     """
     Assumptions Praccho's making:
@@ -54,6 +63,7 @@ class WorldMAR(pl.LightningModule):
 
         # ----- Encoder -----
         # initial projection
+        self.patch_size = patch_size
         self.token_embed_dim = token_embed_dim * patch_size**2
         self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True) # projs VAE latents to transformer dim
         self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
@@ -115,6 +125,7 @@ class WorldMAR(pl.LightningModule):
         # ----- intialize the vae -----
         self.instantiate_vae(vae_config)
         assert isinstance(self.vae, AutoencoderKL)
+        self.vae_embed_dim = self.vae.latent_dim
         assert self.vae.latent_dim == token_embed_dim
         assert self.vae.seq_h == vae_seq_h & self.vae.seq_w == vae_seq_w
 
@@ -160,7 +171,7 @@ class WorldMAR(pl.LightningModule):
         x = torch.einsum('nchpwq->nhwcpq', x)
         # x = x.reshape(bsz, h_ * w_, c * p ** 2)
         x = x.reshape(bsz, h_, w_, c * p ** 2)
-        return x  # [n, h, w, d]
+        return x  # [bsz, h, w, d]
 
     def unpatchify(self, x):
         bsz = x.shape[0]
@@ -171,7 +182,7 @@ class WorldMAR(pl.LightningModule):
         x = x.reshape(bsz, h_, w_, c, p, p)
         x = torch.einsum('nhwcpq->nchpwq', x)
         x = x.reshape(bsz, c, h_ * p, w_ * p) # TODO: this should probably be changed for optim
-        return x  # [n, c, h, w]
+        return x  # [bsz, c, h, w]
     
     def sample_orders(self, bsz):
         orders = []
@@ -283,35 +294,78 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
     
-    def sample_tokens(self, bsz, num_iter=64, labels=None, temperature=1.0, progress=False):
-
+    @torch.no_grad()
+    def sample_tokens(self, bsz, actions=None, poses=None, num_iter=64, labels=None, temperature=1.0, progress=False):
+        # TODO: FIX ENTIRE FUNCTION
         # init and sample generation orders
-        mask = torch.ones(bsz, self.seq_len).cuda()
-        tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
+        mask = torch.ones(bsz, self.frame_seq_len).cuda()
+        tokens = torch.zeros(bsz, self.frame_seq_len, self.token_embed_dim).cuda()
         orders = self.sample_orders(bsz)
 
         indices = list(range(num_iter))
         if progress:
             indices = tqdm(indices)
+        
+        offsets = torch.zeros(bsz).cuda()
+
         # generate latents
         for step in indices:
+            x_in = tokens.view(bsz, self.seq_h, self.seq_w, -1).unsqueeze(1)
+            # encoder : no spatial/temporal masks needed because everything is a single frame
+            enc_out = self.forward_encoder(x_in, actions, poses,
+                                        mask=None, s_attn_mask=None, t_attn_mask=None)
+            # shape (B,1,H,W,D_enc)  → keep same layout for decoder
+            dec_out = self.forward_decoder(enc_out,
+                                        actions, poses,
+                                        mask, offsets,
+                                        s_attn_mask=None, t_attn_mask=None)      # (B,1,H,W,D_dec)
+
+            # logits for current step
+            logits = dec_out.squeeze(1)              # (B,H,W,D_dec)
+            logits = logits / temperature
+            logits_flat = logits.view(bsz, self.frame_seq_len, -1)   # (B, HW, D_dec)
+
+            # ── pick the positions we have to predict in this round ────────────
+            #     (mask currently marks "unknown" positions)
+            target_logits = logits_flat[mask]        # (N_mask, D_dec)
+
+            # DiffLoss has its own sampling helper that returns token-space latents
+            sampled_latents = self.diffloss.sample(target_logits,
+                                                temperature=temperature)  # (N_mask, token_embed_dim)
+
+            # fill in predictions
+            tokens[mask] = sampled_latents
+
+            # ── schedule next-round masking  (MaskGIT cosine rule) ─────────────
+            mask_ratio = np.cos(math.pi * 0.5 * (step + 1) / num_iter) 
+            mask_len = torch.Tensor([np.floor(self.frame_seq_len * mask_ratio)]).cuda()
+
+            # masks out at least one for the next iteration
+            mask_len = torch.maximum(torch.Tensor([1]).cuda(),
+                                     torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
+
+            # get masking for next iteration and locations to be predicted in this iteration
+            mask_next = mask_by_order(mask_len[0], orders, bsz, self.frame_seq_len)
+
+
+
+
+
+
+
             cur_tokens = tokens.clone()
 
-            # class embedding and CFG
+            # class embedding
             if labels is not None:
                 class_embedding = self.class_emb(labels)
             else:
                 class_embedding = self.fake_latent.repeat(bsz, 1)
-            if not cfg == 1.0:
-                tokens = torch.cat([tokens, tokens], dim=0)
-                class_embedding = torch.cat([class_embedding, self.fake_latent.repeat(bsz, 1)], dim=0)
-                mask = torch.cat([mask, mask], dim=0)
 
             # mae encoder
-            x = self.forward_mae_encoder(tokens, mask, class_embedding)
+            x = self.forward_encoder(tokens, mask, class_embedding)
 
             # mae decoder
-            z = self.forward_mae_decoder(x, mask)
+            z = self.forward_decoder(x, mask)
 
             # mask ratio for the next round, following MaskGIT and MAGE.
             mask_ratio = np.cos(math.pi / 2. * (step + 1) / num_iter)
@@ -322,30 +376,16 @@ class WorldMAR(pl.LightningModule):
                                      torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
 
             # get masking for next iteration and locations to be predicted in this iteration
-            mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
+            mask_next = mask_by_order(mask_len[0], orders, bsz, self.frame_seq_len)
             if step >= num_iter - 1:
                 mask_to_pred = mask[:bsz].bool()
             else:
                 mask_to_pred = torch.logical_xor(mask[:bsz].bool(), mask_next.bool())
             mask = mask_next
-            if not cfg == 1.0:
-                mask_to_pred = torch.cat([mask_to_pred, mask_to_pred], dim=0)
 
             # sample token latents for this step
             z = z[mask_to_pred.nonzero(as_tuple=True)]
-            # cfg schedule follow Muse
-            if cfg_schedule == "linear":
-                cfg_iter = 1 + (cfg - 1) * (self.seq_len - mask_len[0]) / self.seq_len
-            elif cfg_schedule == "constant":
-                cfg_iter = cfg
-            else:
-                raise NotImplementedError
-            sampled_token_latent = self.diffloss.sample(z, temperature, cfg_iter)
-            if not cfg == 1.0:
-                sampled_token_latent, _ = sampled_token_latent.chunk(2, dim=0)  # Remove null class samples
-                mask_to_pred, _ = mask_to_pred.chunk(2, dim=0)
 
-            cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent
             tokens = cur_tokens.clone()
 
         # unpatchify
