@@ -87,3 +87,6 @@ venv.bak/
 
 # Data
 data
+
+# DS Store
+**/*.DS_store
