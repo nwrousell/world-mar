@@ -1,14 +1,14 @@
 # world-mar
 
-- [ ] dataloader w/ relative pose
-- [ ] ROPE embeddings ([from WorldMem](https://github.com/xizaoqu/WorldMem/blob/main/algorithms/worldmem/models/rotary_embedding_torch.py))
-- [ ] retrieval func based on pose
-- [ ] Architecture
-    - [ ] ST transformer
-    - [ ] Oasis VAE
-    - [ ] Diffusion Model
+- [x] dataloader w/ relative pose
+- [x] ROPE embeddings ([from WorldMem](https://github.com/xizaoqu/WorldMem/blob/main/algorithms/worldmem/models/rotary_embedding_torch.py))
+- [x] retrieval func based on pose
+- [x] Architecture
+    - [x] ST transformer
+    - [x] Oasis VAE
+    - [x] Diffusion Model
     - [ ] _Optional:_ [Pose Predictor](https://github.com/xizaoqu/WorldMem/blob/main/algorithms/worldmem/models/pose_prediction.py)
-- [ ] training loop
+- [x] training loop
 
 
 ## Relevant Papers
