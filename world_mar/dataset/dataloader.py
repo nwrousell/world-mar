@@ -392,10 +392,9 @@ class MinecraftDataset(Dataset):
         }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, index_path: str, memory_frames=500, num_context_frames=5):
+    def __init__(self, dataset_dir: str, memory_frames=500, num_context_frames=5):
         super().__init__()
         self.dataset_dir = dataset_dir
-        self.index_path = index_path
         self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
     def train_dataloader(self, batch_size):
