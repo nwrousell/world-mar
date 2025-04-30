@@ -226,13 +226,20 @@ class MinecraftDataset(Dataset):
         # determine demonstration ids
         unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
         unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
-        self.unique_ids = sorted(unique_ids)[:5]
+        print(len(unique_ids))
+        # self.unique_ids = sorted(unique_ids)[:5]
 
         # read counts metadata
         with open(os.path.join(dataset_dir, "counts.json"), "rt") as f:
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
+        self.unique_ids = list(self.demo_to_num_frames.keys())
+
+        print(len(self.unique_ids))
+
+        # FIRST 5 FOR NOW
+        self.unique_ids = self.unique_ids[:5]
 
         # construct demo_id -> start_frame map (or grab from cache)
         # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
@@ -358,17 +365,19 @@ class MinecraftDataset(Dataset):
         # read frames from disk
         frames = []
         for frame_i in frame_indices:
-            frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_idx:06d}.jpg")
-            frame = torch.tensor(cv2.imread(frame_path))
-            frame = frame[..., [2, 1, 0]] # BGR --> RGB
+            # frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_i:06d}.jpg")
+            latent_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_i:06d}.bin")
+            latent = torch.tensor(np.fromfile(latent_path, np.float32).reshape(576, 16))
+            # frame = torch.tensor(cv2.imread(frame_path))
+            # frame = frame[..., [2, 1, 0]] # BGR --> RGB
 
             # draw cursor on frame if GUI is open
-            if is_gui_open[frame_i]:
-                camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
-                cursor_x = int(mouse_pos[frame_i]["x"] * camera_scaling_factor)
-                cursor_y = int(mouse_pos[frame_i]["y"] * camera_scaling_factor)
-                composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
-            frames.append(frame)
+            # if is_gui_open[frame_i]:
+            #     camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
+            #     cursor_x = int(mouse_pos[frame_i]["x"] * camera_scaling_factor)
+            #     cursor_y = int(mouse_pos[frame_i]["y"] * camera_scaling_factor)
+            #     composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
+            frames.append(latent)
 
         # add padding frames if necessary
         num_non_padding_frames = len(frames)

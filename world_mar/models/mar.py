@@ -100,8 +100,8 @@ class WorldMAR(pl.LightningModule):
             STBlock(
                 st_embed_dim, encoder_num_heads, qkv_bias=True,
                 proj_drop=proj_dropout, attn_drop=attn_dropout,
-                spatial_rotary_emb=self.enc_spatial_rotary_emb,
-                temporal_rotary_emb=self.enc_temporal_rotary_emb
+                spatial_rotary_emb=self.enc_spatial_rotary_embedder,
+                temporal_rotary_emb=self.enc_temporal_rotary_embedder
             ) for _ in range(encoder_depth)])
         # layer normalization
         self.encoder_norm = nn.LayerNorm(st_embed_dim)
@@ -139,13 +139,16 @@ class WorldMAR(pl.LightningModule):
         self.diffusion_batch_mul = diffusion_batch_mul
 
         # ----- intialize the vae -----
-        self.instantiate_vae(vae_config)
-        assert isinstance(self.vae, AutoencoderKL)
-        self.vae_embed_dim = self.vae.latent_dim
-        assert self.vae.latent_dim == token_embed_dim
-        assert self.vae.seq_h == vae_seq_h & self.vae.seq_w == vae_seq_w
+        # self.instantiate_vae(vae_config)
+        # assert isinstance(self.vae, AutoencoderKL)
+        # self.vae_embed_dim = self.vae.latent_dim
+        # assert self.vae.latent_dim == token_embed_dim
+        # assert self.vae.seq_h == vae_seq_h & self.vae.seq_w == vae_seq_w
 
-        self.seq_h, self.seq_w = self.vae.seq_h // patch_size, self.vae.seq_w // patch_size
+        self.vae_seq_h = 18
+        self.vae_seq_w = 32
+
+        self.seq_h, self.seq_w = self.vae_seq_h // patch_size, self.vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
         # we assume here the diffusion model operates one frame at a time:
         self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.seq_h, self.seq_w, st_embed_dim))
@@ -375,14 +378,12 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def forward(self, frames, actions, poses, timestamps, padding_mask=None):
-        # TODO: fill this out more detail
-
-        b = frames.shape[0]
+    def forward(self, x, actions, poses, timestamps, padding_mask=None):
+        b = x.shape[0]
 
         # 1) compress frames w/ vae
-        x = rearrange(frames, "b t h w c -> (b t) c h w")
-        x = self.vae.encode(frames).sample() # (b t) (h w) d
+        # x = rearrange(frames, "b t h w c -> (b t) c h w")
+        # x = self.vae.encode(frames).sample() # (b t) (h w) d
         x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
         x = rearrange(x, "(b t) h w d -> b t h w d", b=b)
         x_gt = x.clone().detach()

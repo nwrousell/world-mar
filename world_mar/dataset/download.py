@@ -18,20 +18,28 @@ import glob, os, cv2, json
 import random
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+from omegaconf import OmegaConf
+import torch.multiprocessing as mp
 from tqdm import tqdm
+from world_mar.modules.utils import instantiate_from_config
+import torch
 import shutil
+from time import time
+import numpy as np
 
 MAX_THREADS = 10
 
-frame_counter_lock = Lock()
-num_total_frames = 0
-demonstration_id_to_num_frames = {}
+# frame_counter_lock = Lock()
+# num_total_frames = 0
+# demonstration_id_to_num_frames = {}
 
 
 parser = argparse.ArgumentParser(description="Download OpenAI contractor datasets")
-parser.add_argument("--json-file", type=str, required=True, help="Path to the index .json file")
+# parser.add_argument("--json-file", type=str, required=True, help="Path to the index .json file")
+# parser.add_argument("--num-demos", type=int, default=None, help="Maximum number of demonstrations to download")
 parser.add_argument("--output-dir", type=str, required=True, help="Path to the output directory")
-parser.add_argument("--num-demos", type=int, default=None, help="Maximum number of demonstrations to download")
+
+CONFIG_PATH = "configs/world_mar.yaml"
 
 def relpaths_to_download(relpaths, output_dir):
     def read_json(file_name):
@@ -79,11 +87,62 @@ def unroll_mp4_into_jpgs(mp4_path: str, output_folder: str, jpg_quality=95) -> i
     cap.release()
     return frame_idx
 
+def unroll_mp4_into_latents(mp4_path: str, output_folder: str, vae, gpu_id) -> int:
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Open the video file
+    cap = cv2.VideoCapture(mp4_path)
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video {mp4_path}")
+
+    frame_idx = 0
+    BATCH_SIZE = 128
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break  # End of video
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_rgb = frame_rgb.astype(np.float32) / 255.0
+        frames.append(torch.tensor(frame_rgb).permute(2,0,1)) # (360, 640, 3)
+
+        if len(frames) == BATCH_SIZE:
+            batch = torch.stack(frames).to(f"cuda:{gpu_id}")
+            start = time()
+            with torch.no_grad():
+                latents = vae.encode(batch).sample()
+            end = time()
+            for latent in latents:
+                path = os.path.join(output_folder, f"frame{frame_idx:06d}.bin")
+                latent.cpu().numpy().tofile(path) # (576, 16), np.float32
+                # torch.save(latent, path)
+                frame_idx += 1
+            print(f"wrote {BATCH_SIZE} latents to {output_folder}")
+            frames = []
+
+
+    batch = torch.stack(frames).to(f"cuda:{gpu_id}")
+    latents = vae.encode(batch).sample()
+    for latent in latents:
+        path = os.path.join(output_folder, f"frame{frame_idx:06d}.bin")
+        latent.cpu().numpy().tofile(path)
+        # torch.save(latent, path)
+        frame_idx += 1
+
+    cap.release()
+
+    os.remove(mp4_path)
+
+    return frame_idx
+
 def download_video_and_action_files(basedir: str, relpath: str, pbar):
     global num_total_frames
     url = basedir + relpath
     filename = os.path.basename(relpath)
     outpath = os.path.join(args.output_dir, filename)
+
     print(f"Downloading {outpath}...")
     try:
         urllib.request.urlretrieve(url, outpath)
@@ -112,25 +171,26 @@ def download_video_and_action_files(basedir: str, relpath: str, pbar):
         return
 
     # unroll into folder of jpgs
-    folder_path = outpath.removesuffix(".mp4")
-    demo_id = os.path.basename(folder_path)
-    try:
-        num_frames = unroll_mp4_into_jpgs(outpath, folder_path)
-    except Exception as e:
-        shutil.rmtree(folder_path)
-        os.remove(jsonl_outpath)
-        os.remove(outpath)
-        return
+    # folder_path = outpath.removesuffix(".mp4")
+    # demo_id = os.path.basename(folder_path)
+    # try:
+        # num_frames = unroll_mp4_into_jpgs(outpath, folder_path)
+    # num_frames = unroll_mp4_into_latents(outpath, folder_path, vae)
+    # except Exception as e:
+    #     shutil.rmtree(folder_path)
+    #     os.remove(jsonl_outpath)
+    #     os.remove(outpath)
+    #     return
     
-    os.remove(outpath)
+    # os.remove(outpath)
 
     # update count
-    with frame_counter_lock:
-        num_total_frames += num_frames
-        demonstration_id_to_num_frames[demo_id] = num_frames
+    # with frame_counter_lock:
+    #     num_total_frames += num_frames
+    #     demonstration_id_to_num_frames[demo_id] = num_frames
 
     pbar.update(1)
-    print(f"Finished downloading and unrolling {outpath}")
+    print(f"Finished downloading {outpath}")
 
 def download_minecraft_data(json_file: str, num_demos: int, output_dir: str):
     global num_total_frames
@@ -142,6 +202,12 @@ def download_minecraft_data(json_file: str, num_demos: int, output_dir: str):
     data = eval(data)
     basedir = data["basedir"]
     relpaths = data["relpaths"]
+
+    # filter out demonstrations we already have downloaded
+    # unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
+    # unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
+    # relpaths = filter(lambda r:r.split(".")[0].split("/")[-1] not in already_present, relpaths)
+
     if args.num_demos is not None:
         # relpaths = relpaths[:args.num_demos]
         relpaths = random.sample(relpaths, num_demos)
@@ -155,14 +221,58 @@ def download_minecraft_data(json_file: str, num_demos: int, output_dir: str):
             executor.map(lambda rp: download_video_and_action_files(basedir, rp, pbar), relpaths)
     
 
+    # print(f"total frames: {num_total_frames}")
+    # counts_dict = { 
+    #     "total_frames": num_total_frames,
+    #     "demonstration_id_to_num_frames": demonstration_id_to_num_frames
+    # }
+    # with open(os.path.join(output_dir, "counts.json"), "wt") as f:
+    #     json.dump(counts_dict, f)
+
+def worker(gpu_id, demo_ids, dataset_dir, return_dict):
+    torch.cuda.set_device(f"cuda:{gpu_id}")
+    vae_cfg = OmegaConf.load(CONFIG_PATH)["model"]["params"]["vae_config"]
+    vae = instantiate_from_config(vae_cfg).to(f"cuda:{gpu_id}")
+    for param in vae.parameters():
+        param.requires_grad=False
+
+    for demo_id in demo_ids:
+        mp4_path = os.path.join(dataset_dir, f"{demo_id}.mp4")
+        demo_output_dir = os.path.join(dataset_dir, demo_id)
+        num_frames = unroll_mp4_into_latents(mp4_path, demo_output_dir, vae, gpu_id)
+        return_dict[demo_id] = num_frames
+
+def precompute_latents(dataset_dir: str):
+    unique_ids = glob.glob(os.path.join(dataset_dir, "*.jsonl"))
+    unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))    
+    
+    chunks = [unique_ids[i::2] for i in range(2)]
+
+    mp.set_start_method("spawn", force=True)
+    manager = mp.Manager()
+    return_dict = manager.dict()
+
+    processes = []
+    for gpu_id, demo_chunk in enumerate(chunks):
+        p = mp.Process(target=worker, args=(gpu_id, demo_chunk, dataset_dir, return_dict))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    demonstration_id_to_num_frames = dict(return_dict)
+    num_total_frames = sum(demonstration_id_to_num_frames.values())
+
     print(f"total frames: {num_total_frames}")
     counts_dict = { 
         "total_frames": num_total_frames,
         "demonstration_id_to_num_frames": demonstration_id_to_num_frames
     }
-    with open(os.path.join(output_dir, "counts.json"), "wt") as f:
+    with open(os.path.join(dataset_dir, "counts.json"), "wt") as f:
         json.dump(counts_dict, f)
-        
+   
 if __name__ == "__main__":
     args = parser.parse_args()
-    download_minecraft_data(args.json_file, args.num_demos, args.output_dir)
+    # download_minecraft_data(args.json_file, args.num_demos, args.output_dir)
+    precompute_latents(args.output_dir)
