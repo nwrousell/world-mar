@@ -14,11 +14,30 @@ from einops import rearrange
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
+import wandb
 
 from world_mar.modules.utils import instantiate_from_config
 from world_mar.dataset.dataloader import MinecraftDataModule
 
 LOG_PARENT = "logs"
+
+class ImageLogger(pl.Callback):
+    def __init__(self, log_every_n_steps=1000):
+        super().__init__()
+        self.log_every_n_steps = log_every_n_steps
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        global_step = trainer.global_step
+
+        if global_step % self.log_every_n_steps == 0:
+            
+            images = pl_module.sample_images() 
+
+            # Convert to W&B Image format
+            wandb_images = [wandb.Image(img) for img in images]
+
+            # Log to W&B
+            trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
 
 def get_callbacks(logdir):
     return [
@@ -28,7 +47,8 @@ def get_callbacks(logdir):
             save_top_k=3,
             monitor="train_loss", # TODO: probably do val loss, im lazy
             mode="min"
-        )
+        ),
+        # ImageLogger()
     ]
 
 def find_latest_checkpoint(logdir):

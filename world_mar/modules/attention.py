@@ -3,7 +3,7 @@ Adapted from: https://github.com/xizaoqu/WorldMem/blob/main/algorithms/worldmem/
 """
 
 from einops import rearrange
-from embeddings.rotary_embedding import RotaryEmbedding, apply_rotary_emb
+from .embeddings.rotary_embedding import RotaryEmbedding, apply_rotary_emb
 import numpy as np
 from typing import Optional
 from collections import namedtuple
