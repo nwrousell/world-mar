@@ -332,6 +332,7 @@ class MinecraftDataset(Dataset):
         return self.total_frames - len(self.demo_to_metadata.keys()) # we can't sample first frames cause we won't have context
 
     def __getitem__(self, idx):
+        idx = 20 # TODO: REMOVE HARD CODED FOR TEST
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
 
         assert frame_idx > 0 and frame_idx < self.demo_to_num_frames[demo_id]

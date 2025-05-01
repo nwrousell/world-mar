@@ -97,8 +97,8 @@ class WorldMAR(pl.LightningModule):
         self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
         self.z_proj_ln = nn.LayerNorm(st_embed_dim, eps=1e-6)
         # special tokens [PRED] and [CTX]
-        self.pred_token = nn.Parameter(torch.zeros(1, 1, st_embed_dim))
-        self.ctx_token = nn.Parameter(torch.zeros(1, 1, st_embed_dim))
+        self.pred_token = nn.Parameter(torch.zeros(1, st_embed_dim))
+        self.ctx_token = nn.Parameter(torch.zeros(1, st_embed_dim))
         # encoder spatio-temporal attention blocks
         self.encoder_blocks = nn.ModuleList([
             STBlock(
