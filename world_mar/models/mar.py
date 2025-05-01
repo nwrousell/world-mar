@@ -480,7 +480,7 @@ class WorldMAR(pl.LightningModule):
     
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
-        lr_sched = LinearLR(optim, start_factor=1.0, end_factor=1.0, total_iters=self.warmup_steps)
+        lr_sched = LinearLR(optim, start_factor=1.0/5, end_factor=1.0, total_iters=self.warmup_steps)
 
         return {
             "optimizer": optim,
