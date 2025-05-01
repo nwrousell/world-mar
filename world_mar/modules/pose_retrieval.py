@@ -293,7 +293,7 @@ def is_inside_fovs_3d(points, centers, center_pitches, center_yaws, fov_half_h, 
     # Check if both horizontal and vertical angles are within their respective FOV limits
     return (diff_azimuth < fov_half_h) & (diff_elevation < fov_half_v)
 
-def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.05, k=3, do_optim=True):
+def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.05, k=3, do_optim=True, device="cpu"):
     """
     Returns the indices of up to k other_poses that have the most overlap with target_pose
 
@@ -303,12 +303,12 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
 
     :return: (k,) indices (may actually be less than k if there aren't enough frames with >min_overlap)
     """
-    fov_half_h = torch.tensor(105 / 2, device=target_pose.device)
-    fov_half_v = torch.tensor(75 / 2, device=target_pose.device)
+    fov_half_h = torch.tensor(105 / 2, device=device)
+    fov_half_v = torch.tensor(75 / 2, device=device)
 
-    target_pose = target_pose.clone()
-    other_poses = other_poses.clone()
-    points = points.clone()
+    target_pose = target_pose.clone().to(device)
+    other_poses = other_poses.clone().to(device)
+    points = points.clone().to(device)
 
     other_poses[:, :3] -= target_pose[:3]
     target_pose[:3] = torch.tensor([0,0,0])

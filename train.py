@@ -89,26 +89,27 @@ def main(args):
     model_cfg = cfg.model
     model = instantiate_from_config(model_cfg)
 
-    # TODO: train!
     model.learning_rate = model_cfg.learning_rate
-    # TODO: add some more callbacks i.e. sequence logging (image, etc.) feedback to this
     callbacks = get_callbacks(logdir)
 
     if torch.cuda.is_available():
         num_devices = torch.cuda.device_count()
         accelerator = "gpu"
         model.learning_rate *= num_devices
+        torch.set_float32_matmul_precision('medium')
+        
+        for i in range(torch.cuda.device_count()):
+            print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
     else:
         num_devices = 1
         accelerator = "cpu"
 
-    # TODO: add logger
     trainer = pl.Trainer(
         accelerator=accelerator, devices=num_devices, precision="bf16-mixed",
-        callbacks=callbacks
+        callbacks=callbacks, logger=WandbLogger(project="WorldMar", log_model="all", name=name, entity="praccho-brown-university")
     )
 
-    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path, logger=WandbLogger(project="WorldMar", log_model="all"))
+    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path)
 
 if __name__ == '__main__':
     parser = ArgumentParser()

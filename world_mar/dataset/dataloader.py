@@ -224,22 +224,20 @@ class MinecraftDataset(Dataset):
         self.num_context_frames = num_context_frames
 
         # determine demonstration ids
-        unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
-        unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
-        print(len(unique_ids))
-        # self.unique_ids = sorted(unique_ids)[:5]
+        # unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
+        # unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
+        # print(len(unique_ids))
+        # self.unique_ids = sorted(unique_ids)
 
         # read counts metadata
         with open(os.path.join(dataset_dir, "counts.json"), "rt") as f:
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
-        self.unique_ids = list(self.demo_to_num_frames.keys())
+        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
 
-        print(len(self.unique_ids))
-
-        # FIRST 5 FOR NOW
-        self.unique_ids = self.unique_ids[:5]
+        for demo in self.demo_to_num_frames.keys():
+            self.demo_to_num_frames[demo] -= 1
 
         # construct demo_id -> start_frame map (or grab from cache)
         # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
@@ -252,12 +250,15 @@ class MinecraftDataset(Dataset):
         self.demo_to_start_frame = {}
         self.demo_to_metadata = {}
         current_frame = 0
+        start = time()
         for demo_id in self.unique_ids:
             self.demo_to_start_frame[demo_id] = current_frame
-            current_frame += self.demo_to_num_frames[demo_id]
+            current_frame += self.demo_to_num_frames[demo_id] - 1
 
             # load all actions/poses into memory now and preprocess
             self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
+
+        print(f"FINISHED PREPROCESSING ALL METADATA: {time() - start}")
 
         d = {"demo_to_metadata": self.demo_to_metadata, "demo_to_start_frame": self.demo_to_start_frame}
         # torch.save(d, cache_path)
@@ -314,7 +315,6 @@ class MinecraftDataset(Dataset):
             is_gui_open.append(step_data["isGuiOpen"])
             mouse_pos.append(step_data["mouse"])
 
-
         action_matrix = torch.stack(action_vectors)
         pose_matrix = torch.stack(pose_vectors, axis=0)
 
@@ -322,10 +322,10 @@ class MinecraftDataset(Dataset):
     
     def _idx_to_demo_and_frame(self, idx) -> Tuple[str, int]:
         for demo_id, start_frame in self.demo_to_start_frame.items():
-            n_frames = self.demo_to_num_frames[demo_id] - 1 # can sample n-1 frames
-            if idx >= start_frame and idx < start_frame + n_frames:
-                return demo_id, idx - start_frame + 1 # we can't sample first frames so add 1
-        
+            n_usable_frames = self.demo_to_num_frames[demo_id] - 1 # can sample n-1 frames
+            if idx >= start_frame and idx < start_frame + n_usable_frames:
+                return demo_id, idx - start_frame + 1
+
         raise Exception("out of bounds")
 
     def __len__(self) -> int:
@@ -334,7 +334,7 @@ class MinecraftDataset(Dataset):
     def __getitem__(self, idx):
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
 
-        assert frame_idx > 0        
+        assert frame_idx > 0 and frame_idx < self.demo_to_num_frames[demo_id]
 
         action_matrix, pose_matrix, is_gui_open, mouse_pos = (
             self.demo_to_metadata[demo_id]["action_matrix"], 
@@ -352,7 +352,7 @@ class MinecraftDataset(Dataset):
             other_poses=pose_matrix[start_memory_idx:frame_idx], 
             points=self.points, 
             min_overlap=0.1, 
-            k=self.num_context_frames
+            k=self.num_context_frames,
         )
         context_indices = [i + max(0, frame_idx-self.memory_frames) for i in context_indices]  # convert back to trajectory indices
 
@@ -381,8 +381,8 @@ class MinecraftDataset(Dataset):
 
         # add padding frames if necessary
         num_non_padding_frames = len(frames)
-        if len(frames) < self.num_context_frames+1:
-            num_padding = (self.num_context_frames + 1) - len(frames)
+        if len(frames) < self.num_context_frames + 1:
+            num_padding = self.num_context_frames + 1 - len(frames)
             plucker = torch.cat([plucker, torch.zeros((num_padding, *plucker[0].shape))], dim=0)
 
             for _ in range(num_padding):
@@ -392,40 +392,47 @@ class MinecraftDataset(Dataset):
 
         frames = torch.stack(frames, axis=0)
 
+        assert len(frames) == self.num_context_frames + 1
         # print("returning:", frames.shape, plucker.shape, action.shape, frame_indices.shape)
+
+        timestamps = frame_indices - frame_idx
 
         return {
             "frames": frames,
             "plucker": plucker,
             "action": action,
-            "timestamps": frame_indices,
+            "timestamps": timestamps,
             "num_non_padding_frames": num_non_padding_frames
         }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, memory_frames=500, num_context_frames=5):
+    def __init__(self, dataset_dir: str, batch_sz=64, memory_frames=300, num_context_frames=4):
         super().__init__()
         self.dataset_dir = dataset_dir
+        self.batch_sz = batch_sz
         self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
-    def train_dataloader(self, batch_size):
-        return DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
+    def train_dataloader(self):
+        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=1, shuffle=True)
     
-    def val_dataloader(self, batch_size):
-        return DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
+    def val_dataloader(self):
+        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=1, shuffle=True)
 
 
 if __name__ == "__main__":
-    dataset = MinecraftDataset(dataset_dir="../minecraft_seq")
+    dataset = MinecraftDataset(dataset_dir="/users/nrousell/scratch/minecraft-raw")
     # dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4)
 
-    for num_workers in [0, 2, 4, 8, 16]:
-        loader = DataLoader(dataset, batch_size=64, num_workers=num_workers)
-        start = time()
-        for i, batch in enumerate(loader):
-            if i == 10:
-                break
-        print(f"Workers: {num_workers}, Time: {time() - start:.2f}s")
+    loader = DataLoader(dataset, batch_size=64, num_workers=0)
+
+
+    #for num_workers in [0, 2, 4, 8, 16]:
+    #    loader = DataLoader(dataset, batch_size=64, num_workers=num_workers)
+    #    start = time()
+    #    for i, batch in enumerate(loader):
+    #        if i == 10:
+    #            break
+    #    print(f"Workers: {num_workers}, Time: {time() - start:.2f}s")
 
     # print("len:", len(dataloader))
     # start = time()
@@ -435,4 +442,7 @@ if __name__ == "__main__":
     # for k, v in batch.items():
     #     print(k, v.shape)
 
-# 4.6 --> 11.7
+# Workers: 0, Time: 13.35s
+# Workers: 2, Time: 25.62s
+# Workers: 4, Time: 15.32s
+# Workers: 8, Time: 13.29s

@@ -1,3 +1,6 @@
+.vscode
+*.out
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -15,7 +18,7 @@ downloads/
 eggs/
 .eggs/
 lib/
-lib64/
+lib64/git 
 parts/
 sdist/
 var/
@@ -90,3 +93,6 @@ data
 
 # DS Store
 **/*.DS_store
+
+logs/
+wandb/
