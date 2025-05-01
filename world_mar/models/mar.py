@@ -22,6 +22,8 @@ from world_mar.models.diffloss import DiffLoss
 import pytorch_lightning as pl
 from time import time
 
+seed = 42
+torch.manual_seed(seed)
 
 def mask_by_order(mask_len, order, bsz, seq_len):
     """

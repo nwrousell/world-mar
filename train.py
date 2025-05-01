@@ -96,7 +96,7 @@ def main(args):
         num_devices = torch.cuda.device_count()
         accelerator = "gpu"
         model.learning_rate *= num_devices
-        torch.set_float32_matmul_precision('medium')
+        #torch.set_float32_matmul_precision('medium')
         
         for i in range(torch.cuda.device_count()):
             print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
@@ -105,6 +105,7 @@ def main(args):
         accelerator = "cpu"
 
     trainer = pl.Trainer(
+        #strategy="ddp",
         accelerator=accelerator, devices=num_devices, precision="bf16-mixed",
         callbacks=callbacks, logger=WandbLogger(project="WorldMar", log_model="all", name=name, entity="praccho-brown-university")
     )
