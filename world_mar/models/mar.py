@@ -387,21 +387,14 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def forward(self, x, actions, poses, timestamps, padding_mask=None):
+    def _compute_z_and_mask(self, x, actions, poses, timestamps, padding_mask=None):
         b = x.shape[0]
 
-        # 1) compress frames w/ vae
-        # x = rearrange(frames, "b t h w c -> (b t) c h w")
-        # x = self.vae.encode(frames).sample() # (b t) (h w) d
-        # start = time()
+        # 1) patchify latents
         x = rearrange(x, "b t s c -> (b t) s c")
         x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
         x = rearrange(x, "(b t) h w d -> b t h w d", b=b)
         x_gt = x.clone().detach()
-
-        # end = time()
-        # print(f"patchify: {end - start}")
-        # start = time()
 
         # 2) gen mask
         b, t, h, w, d = x.shape
@@ -415,34 +408,26 @@ class WorldMAR(pl.LightningModule):
         (s_attn_mask_enc, t_attn_mask_enc, 
          s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, pad_mask, offsets, padding_mask=padding_mask)
 
-        # end = time()
-        # print(f"masks: {end - start}")
-        # start = time()
-
         # 4) run encoder
         x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
-
-        # end = time()
-        # print(f"encoder: {end - start}")
-        # start = time()
 
         # 5) run decoder
         z = self.forward_decoder(x, actions, poses, timestamps, pad_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
-        # end = time()
-        # print(f"decoder: {end - start}")
-        # start = time()
+        return z, mask, offsets, x_gt
 
-        # 6) split into tgt frame + diffuse
+    def forward(self, x, actions, poses, timestamps, padding_mask=None):
+        b = x.shape[0]
+        
+        z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask)
+
+        # split into tgt frame + diffuse
         batch_idx = torch.arange(b, device=self.device)
         z_t = z[batch_idx, offsets] # b h w d
         xt_gt = x_gt[batch_idx, offsets] # b h w d
 
         loss = self.forward_diffusion(z_t, xt_gt, mask)        
-
-        # end = time()
-        # print(f"diffuse: {end - start}")
 
         return loss
 
@@ -493,37 +478,38 @@ class WorldMAR(pl.LightningModule):
             }
         }
 
-    def sample(self, frames, actions, poses, timestamps):
-        b = frames.shape[0]
+    def sample(self, x, actions, poses, timestamps):
+        
+        # --- parse batch ---
+        # assume the layout is [PREV_FRAME, CTX_FRAMES ...]
+        frames = format_image(batch["frames"].to(self.device)) # shape [B, T, H, W, C]
+        batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
+        actions = batch["action"].to(self.device) # shape [B, 25]
+        poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
+        timestamps = batch["timestamps"].to(self.device) # shape [B, T]
 
-        # 1) compress frames w/ vae
-        x = rearrange(frames, "b t h w c -> (b t) c h w")
-        x = self.vae.encode(frames).sample() # (b t) (h w) d
-        x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
-        x = rearrange(x, "(b t) h w d -> b t h w d", b=b)
-        x_gt = x.clone().detach()
+        # --- construct padding_mask ---
+        B, L = len(frames), self.num_frames * self.frame_seq_len
+        # assert not torch.any(batch_nframes > self.num_frames)
+        idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
+        padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
-        # 2) gen mask
-        orders = self.sample_orders(b)
-        mask, offsets = self.random_masking(x, orders) # b hw, b
+        z, mask = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask)
 
-        # 3) construct attn_masks
-        (s_attn_mask_enc, t_attn_mask_enc, 
-         s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, mask, offsets, padding_mask=padding_mask)
-
-        # 4) run encoder
-        x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
-
-        # 5) run decoder
-        z = self.forward_decoder(x, actions, poses, timestamps, mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
-        # z : b t h w d
-
-        # 6) split into tgt frame + diffuse
+        # split into tgt frame + diffuse
         batch_idx = torch.arange(b, device=self.device)
-        z_t = x[batch_idx, offsets] # b h w d
-        xt_gt = x_gt[batch_idx, offsets] # b h w d
+        z_t = z[batch_idx, offsets] # b h w d
+        # xt_gt = x_gt[batch_idx, offsets] # b h w d
+
+        # diffuse
+        z = z + self.diffusion_pos_emb_learned
+        z = rearrange(z, "b h w d -> (b h w) d")
         
-        
+        # bc we're predicting on all masked at once, this is pretty simple
+        patch_preds = self.diffloss.sample_ddim(z, cfg=1.0)
+        x_pred = self.unpatchify(patch_preds)
+
+        return x_pred
 
     # def sample_tokens(self, bsz, num_iter=64, labels=None, temperature=1.0, progress=False):
 

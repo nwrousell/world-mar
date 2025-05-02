@@ -52,6 +52,30 @@ class DiffLoss(nn.Module):
             temperature=temperature
         )
         return sampled_token_latent
+    
+
+    def sample_ddim(self, z, temperature=1.0, cfg=1.0):
+        if not cfg == 1.0:
+            noise = torch.randn(z.shape[0] // 2, self.in_channels).cuda()
+            noise = torch.cat([noise, noise], dim=0)
+            model_kwargs = dict(c=z, cfg_scale=cfg)
+            sample_fn = self.net.forward_with_cfg
+        else:
+            noise = torch.randn(z.shape[0], self.in_channels).cuda()
+            model_kwargs = dict(c=z)
+            sample_fn = self.net.forward
+        
+        sampled_token_latent = self.gen_diffusion.ddim_sample_loop(
+            sample_fn, 
+            noise.shape, 
+            noise, 
+            clip_denoised=False, 
+            model_kwargs=model_kwargs, 
+            progress=False,
+            temperature=temperature, 
+            eta=0.0 # true DDIM
+        )
+        return sampled_token_latent
 
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift

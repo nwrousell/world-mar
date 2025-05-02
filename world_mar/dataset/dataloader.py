@@ -326,10 +326,10 @@ class MinecraftDataset(Dataset):
             if idx >= start_frame and idx < start_frame + n_usable_frames:
                 return demo_id, idx - start_frame + 1
 
-        raise Exception("out of bounds")
+        raise Exception(f"out of bounds - idx: {idx}, len: {self.__len__()}, start_frame: {start_frame}, n_usable_frames: {n_usable_frames}")
 
     def __len__(self) -> int:
-        return self.total_frames - len(self.demo_to_metadata.keys()) # we can't sample first frames cause we won't have context
+        return self.total_frames - len(self.demo_to_metadata.keys()) * 2 # we can't sample first frames cause we won't have context
 
     def __getitem__(self, idx):
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
