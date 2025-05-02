@@ -57,6 +57,7 @@ class WorldMAR(pl.LightningModule):
         mask_ratio_min=0.7,
         proj_dropout=0.1,
         attn_dropout=0.1,
+        gradient_clip_val=1.0,
         warmup_steps=10000, # TODO: change this depending on dataset size
         **kwargs
     ):
@@ -66,6 +67,7 @@ class WorldMAR(pl.LightningModule):
         action_dim = 25
         embedding_hidden_dim = 128
         self.warmup_steps = warmup_steps
+        self.gradient_clip_val = gradient_clip_val
         self.seq_h, self.seq_w = vae_seq_h // patch_size, vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
 
@@ -455,15 +457,14 @@ class WorldMAR(pl.LightningModule):
         # --- forward + backprop ---
         loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.manual_backward(loss)
 
-        # start = time()
+        # --- clip gradients, backwards, step
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.gradient_clip_val)
+        self.manual_backward(loss)
 
         opt.step()
         lr_sched.step()
 
-        # end = time()
-        # print(f"backprop: {end - start}")
     
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
