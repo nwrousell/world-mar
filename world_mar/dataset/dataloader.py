@@ -421,17 +421,18 @@ class MinecraftDataset(Dataset):
         }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, batch_sz=64, memory_frames=300, num_context_frames=4):
+    def __init__(self, dataset_dir: str, batch_sz=64, memory_distance=1000, memory_size=100, num_context_frames=4, train_split=0.9):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.batch_sz = batch_sz
-        self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
+        dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_distance=memory_distance, memory_size=memory_size, num_context_frames=num_context_frames)
+        self.train_dataset, self.val_dataset = torch.utils.data.random_split(dataset, [train_split, 1-train_split])
     
     def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=8, shuffle=True)
+        return DataLoader(self.train_dataset, batch_size=self.batch_sz, num_workers=8, shuffle=True)
     
     def val_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=8, shuffle=True)
+        return DataLoader(self.val_dataset, batch_size=self.batch_sz, num_workers=8)
 
 
 if __name__ == "__main__":
