@@ -27,6 +27,8 @@ import shutil
 from time import time
 import numpy as np
 
+from .dataloader import MINEREC_ORIGINAL_HEIGHT_PX, composite_images_with_alpha
+
 MAX_THREADS = 10
 
 # frame_counter_lock = Lock()
@@ -88,7 +90,7 @@ def unroll_mp4_into_jpgs(mp4_path: str, output_folder: str, jpg_quality=95) -> i
     cap.release()
     return frame_idx
 
-def unroll_mp4_into_latents(mp4_path: str, output_folder: str, vae, gpu_id) -> int:
+def unroll_mp4_into_latents(mp4_path: str, output_folder: str, vae, gpu_id, cursor_image, cursor_alpha) -> int:
     # Create output folder if it doesn't exist
     os.makedirs(output_folder, exist_ok=True)
 
@@ -97,24 +99,27 @@ def unroll_mp4_into_latents(mp4_path: str, output_folder: str, vae, gpu_id) -> i
     if not cap.isOpened():
         raise IOError(f"Cannot open video {mp4_path}")
 
-    # TODO: draw cursor when GUI is open
-    # if is_gui_open[frame_i]:
-    #     camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
-    #     cursor_x = int(mouse_pos[frame_i]["x"] * camera_scaling_factor)
-    #     cursor_y = int(mouse_pos[frame_i]["y"] * camera_scaling_factor)
-    #     composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
+    # open jsonl file
+    with open(file_name, 'r') as json_file:
+        steps = json.loads('['+','.join(json_file.readlines())+']')
 
     frame_idx = 0
     BATCH_SIZE = 128
     frames = []
-    while True:
+    for i, step_data in enumerate(steps):
         ret, frame = cap.read()
         if not ret:
             break  # End of video
 
+        if step_data["isGuiOpen"]:
+            camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
+            cursor_x = int(step_data["mouse"]["x"] * camera_scaling_factor)
+            cursor_y = int(step_data["mouse"]["y"] * camera_scaling_factor)
+            composite_images_with_alpha(frame, cursor_image, cursor_alpha, cursor_x, cursor_y)
+        
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame_rgb = (frame_rgb.astype(np.float32) / 255.0) * 2 - 1 # bring to [-1, 1]
-        frames.append(torch.tensor(frame_rgb).permute(2,0,1)) # bring to (3, 360, 640)
+        frames.append(torch.tensor(frame_rgb).permute(2,0,1)) # permute to [c, h, w]
 
         if len(frames) == BATCH_SIZE:
             batch = torch.stack(frames).to(f"cuda:{gpu_id}")
@@ -231,10 +236,18 @@ def worker(gpu_id, demo_ids, dataset_dir, return_dict):
     for param in vae.parameters():
         param.requires_grad=False
 
+    cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
+    cursor_image = self.cursor_image[:16, :16, :] # Assume 16x16
+    cursor_alpha = self.cursor_image[:, :, 3:] / 255.0
+    cursor_image = self.cursor_image[:, :, :3]
+
     for demo_id in demo_ids:
         mp4_path = os.path.join(dataset_dir, f"{demo_id}.mp4")
         demo_output_dir = os.path.join(dataset_dir, demo_id)
-        num_frames = unroll_mp4_into_latents(mp4_path, demo_output_dir, vae, gpu_id)
+        try:
+            num_frames = unroll_mp4_into_latents(mp4_path, demo_output_dir, vae, gpu_id, cursor_image, cursor_alpha)
+        except:
+            continue
         return_dict[demo_id] = num_frames
 
 def precompute_latents(dataset_dir: str):
