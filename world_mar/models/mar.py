@@ -493,11 +493,7 @@ class WorldMAR(pl.LightningModule):
 
         opt.step()
         lr_sched.step()
-        end = time()
 
-        # end = time()
-        print(f"forward & backward pass: {end - start}")
-    
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
         lr_sched = LinearLR(optim, start_factor=1.0/5, end_factor=1.0, total_iters=self.warmup_steps)

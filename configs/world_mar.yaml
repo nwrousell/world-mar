@@ -6,3 +6,11 @@ model:
       target: world_mar.oasis_utils.vae.ViT_L_20_Shallow_Encoder 
       params:
         load_from_ckpt: checkpoints/oasis/vit-l-20.safetensors
+
+dataloader:
+  target: world_mar.dataset.dataloader.MinecraftDataModule
+  params:
+    dataset_dir: "data/minecraft-raw/"
+    batch_sz: 64
+    memory_frames: 300
+    num_context_frames: 4
