@@ -64,6 +64,7 @@ def find_latest_checkpoint(logdir):
 def main(args):
     # loading conf
     cfg = OmegaConf.load(args.config)
+    print(f"Loaded config: {args.config}")
 
     # set up logdir
     if args.name:
@@ -81,13 +82,14 @@ def main(args):
     else:
         logdir = args.resume
         ckpt_path = find_latest_checkpoint(args.resume)
+    print(f"Initialized logging directory: {logdir}")
 
-    # more shenanigans...
     train_data = MinecraftDataModule(dataset_dir=args.data_dir)
 
     # load model
     model_cfg = cfg.model
     model = instantiate_from_config(model_cfg)
+    print("Loaded model")
 
     model.learning_rate = model_cfg.learning_rate
     callbacks = get_callbacks(logdir)
@@ -110,6 +112,7 @@ def main(args):
         callbacks=callbacks, logger=WandbLogger(project="WorldMar", log_model="all", name=name, entity="praccho-brown-university")
     )
 
+    print("Starting training...")
     trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path)
 
 if __name__ == '__main__':
