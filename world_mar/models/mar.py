@@ -495,6 +495,25 @@ class WorldMAR(pl.LightningModule):
         opt.step()
         lr_sched.step()
 
+    def validation_step(self, batch, batch_idx):
+        # --- parse batch ---
+        # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
+        frames = batch["frames"].to(self.device) # shape [B, T, H, W, C]
+        batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
+        actions = batch["action"].to(self.device) # shape [B, 25]
+        poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
+        timestamps = batch["timestamps"].to(self.device) # shape [B, T]
+
+        # --- construct padding_mask ---
+        B, L = len(frames), self.num_frames * self.frame_seq_len
+        # assert not torch.any(batch_nframes > self.num_frames)
+        idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
+        padding_mask = idx < batch_nframes.unsqueeze(1) # b t
+
+        # --- forward + backprop ---
+        loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
+        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
         lr_sched = LinearLR(optim, start_factor=1.0/5, end_factor=1.0, total_iters=self.warmup_steps)

@@ -235,10 +235,11 @@ class MinecraftDataset(Dataset):
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
-        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))[:5]
+        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
 
-        for demo in self.demo_to_num_frames.keys():
-            self.demo_to_num_frames[demo] -= 1
+        # THIS IS ONLY NEEDED FOR THE OLD DATASET
+        # for demo in self.demo_to_num_frames.keys():
+        #     self.demo_to_num_frames[demo] -= 1
 
         # construct demo_id -> start_frame map (or grab from cache)
         # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
@@ -381,7 +382,7 @@ class MinecraftDataset(Dataset):
         # convert back to trajectory indices
         context_indices = cur_mem_indices[context_indices]
 
-        frame_indices = torch.tensor([frame_idx] + context_indices)
+        frame_indices = torch.cat([torch.tensor([frame_idx]), context_indices])
 
         # convert poses to plucker
         absolute_camera_to_world_matrices = euler_to_camera_to_world_matrix(pose_matrix[frame_indices])

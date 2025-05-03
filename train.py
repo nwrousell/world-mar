@@ -22,7 +22,7 @@ from world_mar.dataset.dataloader import MinecraftDataModule
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=1000):
+    def __init__(self, log_every_n_steps=100):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -41,8 +41,12 @@ class ImageLogger(pl.Callback):
             sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
 
             # decode to frames
-            to_decode = torch.stack([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
-            prev_frames, gt_frames, pred_frames = pl_module.vae.decode(to_decode).chunk(chunks=3, dim=0) # each are n c h w
+            # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+            to_decode = torch.cat([latents[:, 4], latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+            pl_module.vae.to("cuda")
+            with torch.autocast(device_type="cuda", enabled=False):
+                prev_frames, gt_frames, pred_frames = (((pl_module.vae.decode(to_decode) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=3, dim=0) # each are n c h w
+            pl_module.vae.to("cpu")
 
             trifolds = torch.cat([prev_frames, gt_frames, pred_frames], dim=-1) # concat along width dim
 
@@ -57,7 +61,7 @@ def get_callbacks(logdir):
             dirpath=os.path.join(logdir, "checkpoints/"),
             filename="epoch{epoch:02d}",
             save_top_k=3,
-            monitor="train_loss", # TODO: probably do val loss, im lazy
+            monitor="val_loss",
             mode="min"
         ),
         ImageLogger()
@@ -100,6 +104,7 @@ def main(args):
     model_cfg = cfg.model
     # model_cfg.params.vae_config = None # destroy vae_config so it doesn't load the vae
     model = instantiate_from_config(model_cfg)
+    model.vae.to("cpu")
     print("Loaded model")
     dataloader_cfg = cfg.dataloader
     if args.data_dir:
@@ -131,6 +136,7 @@ def main(args):
     trainer = pl.Trainer(
         #strategy="ddp",
         accelerator=accelerator, devices=num_devices, precision="bf16-mixed",
+        check_val_every_n_epoch=1,
         callbacks=callbacks, logger=WandbLogger(project="WorldMar", log_model="all", name=name, entity="praccho-brown-university")
     )
 
@@ -159,14 +165,6 @@ if __name__ == '__main__':
         type=str,
         help="path to previous run's logdir"
     )
-    parser.add_argument(
-        "-d",
-        "--data-dir",
-        default="",
-        type=str,
-        help="path to data directory"
-    )
-   # ... add more here
     
     args = parser.parse_args()
 

@@ -14,5 +14,5 @@ dataloader:
     batch_sz: 64
     memory_distance: 1000
     memory_size: 100
-    train_split: 0.9 # 0.1 for val
+    train_split: 0.99 # 0.01 for val
     num_context_frames: 4
