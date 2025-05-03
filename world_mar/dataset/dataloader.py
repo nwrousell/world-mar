@@ -372,6 +372,8 @@ class MinecraftDataset(Dataset):
         # TODO: add spatial heuristic filter
         cur_mem_indices = cur_mem_indices[cur_mem_indices >= 0]
         cur_mem_indices = cur_mem_indices[~is_gui_open[cur_mem_indices]] # filter out frames where the GUI is open
+        if cur_mem_indices[-1] != -1:
+            cur_mem_indices = torch.cat([cur_mem_indices, torch.tensor(-1)])
         context_indices = get_most_relevant_poses_to_target(
             target_pose=target_pose, 
             other_poses=pose_matrix[cur_mem_indices], 
