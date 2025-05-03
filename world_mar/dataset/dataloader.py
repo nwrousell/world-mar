@@ -237,7 +237,6 @@ class MinecraftDataset(Dataset):
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
         self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
 
-        # THIS IS ONLY NEEDED FOR THE OLD DATASET
         # for demo in self.demo_to_num_frames.keys():
         #     self.demo_to_num_frames[demo] -= 1
 
@@ -371,7 +370,7 @@ class MinecraftDataset(Dataset):
         cur_mem_indices = frame_idx + self.mem_indices
         # TODO: add spatial heuristic filter
         cur_mem_indices = cur_mem_indices[cur_mem_indices >= 0]
-        cur_mem_indices = cur_mem_indices[~is_gui_open[cur_mem_indices]] # filter out frames where the GUI is open
+        # cur_mem_indices = cur_mem_indices[~is_gui_open[cur_mem_indices]] # filter out frames where the GUI is open
         context_indices = get_most_relevant_poses_to_target(
             target_pose=target_pose, 
             other_poses=pose_matrix[cur_mem_indices], 
