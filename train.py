@@ -30,11 +30,23 @@ class ImageLogger(pl.Callback):
         global_step = trainer.global_step
 
         if global_step % self.log_every_n_steps == 0:
+            num_to_sample = 4
+            latents = batch["frames"].to(pl_module.device)[:num_to_sample]
+            batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:num_to_sample]
+            actions = batch["action"].to(pl_module.device)[:num_to_sample]
+            poses = batch["plucker"].to(pl_module.device)[:num_to_sample]
+            timestamps = batch["timestamps"].to(pl_module.device)[:num_to_sample]
             
-            images = pl_module.sample_images() 
+            # sample latents
+            sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
 
-            # Convert to W&B Image format
-            wandb_images = [wandb.Image(img) for img in images]
+            # decode to frames
+            to_decode = torch.stack([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+            prev_frames, gt_frames, pred_frames = pl_module.vae.decode(to_decode).chunk(chunks=3, dim=0) # each are n c h w
+
+            trifolds = torch.cat([prev_frames, gt_frames, pred_frames], dim=-1) # concat along width dim
+
+            wandb_images = [wandb.Image(img) for img in trifolds]
 
             # Log to W&B
             trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
@@ -48,7 +60,7 @@ def get_callbacks(logdir):
             monitor="train_loss", # TODO: probably do val loss, im lazy
             mode="min"
         ),
-        # ImageLogger()
+        ImageLogger()
     ]
 
 def find_latest_checkpoint(logdir):
@@ -86,7 +98,7 @@ def main(args):
 
     # load model and dataloader from config
     model_cfg = cfg.model
-    model_cfg.params.vae_config = None # destroy vae_config so it doesn't load the vae
+    # model_cfg.params.vae_config = None # destroy vae_config so it doesn't load the vae
     model = instantiate_from_config(model_cfg)
     print("Loaded model")
     dataloader_cfg = cfg.dataloader

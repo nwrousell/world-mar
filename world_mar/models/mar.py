@@ -218,7 +218,7 @@ class WorldMAR(pl.LightningModule):
         return x  # [bsz, h, w, d]
 
     def unpatchify(self, x):
-        # b (h w) d -> b d/p**2 (h p w p)
+        # b (h w) d -> b (h p w p) d/p**2
         
         bsz = x.shape[0]
         p = self.patch_size
@@ -229,7 +229,7 @@ class WorldMAR(pl.LightningModule):
         # x = torch.einsum('nhwcpq->nchpwq', x) # (n, h, w, c, p, q)  →  (n, c, h, p, w, q)
         x = rearrange(x, "n h w c p q -> n h p w q c")
         x = x.reshape(bsz, h_ * p * w_ * p, c)
-        return x  # [bsz, c, (h w)]
+        return x  # [bsz, (h w), c]
     
     def sample_orders(self, bsz):
         orders = []
