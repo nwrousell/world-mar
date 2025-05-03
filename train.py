@@ -102,6 +102,8 @@ def main(args):
     model = instantiate_from_config(model_cfg)
     print("Loaded model")
     dataloader_cfg = cfg.dataloader
+    if args.data_dir:
+        dataloader_cfg.dataset_dir = args.data_dir
     dataloader = instantiate_from_config(dataloader_cfg)
     print("Loaded dataloader")
 

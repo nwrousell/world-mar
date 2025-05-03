@@ -297,8 +297,8 @@ if __name__ == "__main__":
     
     # download mp4s and jsons with a bunch o' threads
     basedir, relpaths = d["basedir"], d["split1"]
-    # relpaths = relpaths_to_download(relpaths, args.output_dir)
-    # download_minecraft_data(basedir, relpaths, args.output_dir)
+    relpaths = relpaths_to_download(relpaths, args.output_dir)
+    download_minecraft_data(basedir, relpaths, args.output_dir)
 
     # use 2 procs (each with with a gpu) to precompute latents
     precompute_latents(args.output_dir)
