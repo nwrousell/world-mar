@@ -267,15 +267,6 @@ def precompute_latents(dataset_dir: str):
     with open(os.path.join(dataset_dir, "counts.json"), "wt") as f:
         json.dump(counts_dict, f)
 
-def download_and_precompute_latents(dataset_dir, basedir, relpaths):
-    # download mp4s and jsons with a bunch o' threads
-    print("num total:", len(relpaths))
-    relpaths = relpaths_to_download(relpaths, dataset_dir)
-    print("num to download:", len(relpaths))
-    download_minecraft_data(basedir, relpaths, dataset_dir)
-
-    # use 2 procs (each with with a gpu) to precompute latents
-    precompute_latents(dataset_dir)
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -289,5 +280,12 @@ if __name__ == "__main__":
     # }
     with open("splits.json", "rt") as f:
         d = json.load(f)
+    
+    # download mp4s and jsons with a bunch o' threads
+    basedir, relpaths = d["basedir"], d["split1"]
+    relpaths = relpaths_to_download(relpaths, args.output_dir)
+    download_minecraft_data(basedir, relpaths, args.output_dir)
 
-    download_and_precompute_latents(args.output_dir, d["basedir"], d["split1"])
+    # use 2 procs (each with with a gpu) to precompute latents
+    # precompute_latents(args.output_dir)
+
