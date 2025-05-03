@@ -411,7 +411,7 @@ class MinecraftDataModule(L.LightningDataModule):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.batch_sz = batch_sz
-        print(self.batch_sz)
+        print(f"Batch size: {self.batch_sz}")
         self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
     def train_dataloader(self):
