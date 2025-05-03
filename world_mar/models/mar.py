@@ -461,15 +461,14 @@ class WorldMAR(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         # --- clip gradients, backwards, step
-        def max_gradients(params):
-            return max([p.grad.abs().item() for p in params if p.grad is not None], default=0.0)
+        # def max_gradients(params):
+        #     return max([p.grad.abs().max().item() for p in params if p.grad is not None], default=0.0)
         
-        print(f"(Before clipping) Maximum of gradients: {max_gradients(self.parameters())}")
-        grad_update_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.gradient_clip_val)
-        print(f"(After clipping) Maximum of gradients: {max_gradients(self.parameters())}")
-        print(f"Total norm of gradient update vector: {grad_update_norm}")
-
         self.manual_backward(loss)
+        # print(f"(Before clipping) Maximum of gradients: {max_gradients(self.parameters())}")
+        grad_update_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.gradient_clip_val, norm_type=2)
+        # print(f"(After clipping) Maximum of gradients: {max_gradients(self.parameters())}")
+        # print(f"Total norm of gradient update vector: {grad_update_norm}")
 
         opt.step()
         lr_sched.step()
