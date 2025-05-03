@@ -281,10 +281,29 @@ def precompute_latents(dataset_dir: str):
     with open(os.path.join(dataset_dir, "counts.json"), "wt") as f:
         json.dump(counts_dict, f)
 
+def count_bin_files_per_demo(dataset_dir: str):
+    demo_map = {}
+
+    for entry in os.listdir(dataset_dir):
+        demo_path = os.path.join(dataset_dir, entry)
+        if os.path.isdir(demo_path):  # Only process directories
+            num = len(os.listdir(demo_path))
+            if num > 1:
+                demo_map[entry] = num
+
+    return demo_map
 
 if __name__ == "__main__":
     args = parser.parse_args()
     
+    demonstration_id_to_num_frames = count_bin_files_per_demo(args.output_dir)
+    counts_dict = { 
+        "total_frames": sum(demonstration_id_to_num_frames.values()),
+        "demonstration_id_to_num_frames": demonstration_id_to_num_frames
+    }
+    with open(os.path.join(args.output_dir, "counts.json"), "wt") as f:
+        json.dump(counts_dict, f)
+
     # basedir, relpaths = get_paths(args.json_file, args.output_dir, args.num_demos)
     # relpaths = list(relpaths)
     # d = {
@@ -292,14 +311,14 @@ if __name__ == "__main__":
     #     "split1": relpaths[::2],
     #     "split2": relpaths[1::2]
     # }
-    with open("splits.json", "rt") as f:
-        d = json.load(f)
+    # with open("splits.json", "rt") as f:
+    #     d = json.load(f)
     
     # download mp4s and jsons with a bunch o' threads
-    basedir, relpaths = d["basedir"], d["split1"]
+    # basedir, relpaths = d["basedir"], d["split1"]
     # relpaths = relpaths_to_download(relpaths, args.output_dir)
     # download_minecraft_data(basedir, relpaths, args.output_dir)
 
     # use 2 procs (each with with a gpu) to precompute latents
-    precompute_latents(args.output_dir)
+    # precompute_latents(args.output_dir)
 
