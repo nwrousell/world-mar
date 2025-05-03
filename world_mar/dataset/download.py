@@ -27,7 +27,7 @@ import shutil
 from time import time
 import numpy as np
 
-from .dataloader import MINEREC_ORIGINAL_HEIGHT_PX, composite_images_with_alpha
+from .dataloader import MINEREC_ORIGINAL_HEIGHT_PX, composite_images_with_alpha, CURSOR_FILE
 
 MAX_THREADS = 10
 
@@ -100,7 +100,7 @@ def unroll_mp4_into_latents(mp4_path: str, output_folder: str, vae, gpu_id, curs
         raise IOError(f"Cannot open video {mp4_path}")
 
     # open jsonl file
-    with open(file_name, 'r') as json_file:
+    with open(mp4_path.replace("mp4", "jsonl"), 'r') as json_file:
         steps = json.loads('['+','.join(json_file.readlines())+']')
 
     frame_idx = 0
@@ -237,16 +237,17 @@ def worker(gpu_id, demo_ids, dataset_dir, return_dict):
         param.requires_grad=False
 
     cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
-    cursor_image = self.cursor_image[:16, :16, :] # Assume 16x16
-    cursor_alpha = self.cursor_image[:, :, 3:] / 255.0
-    cursor_image = self.cursor_image[:, :, :3]
+    cursor_image = cursor_image[:16, :16, :] # Assume 16x16
+    cursor_alpha = cursor_image[:, :, 3:] / 255.0
+    cursor_image = cursor_image[:, :, :3]
 
     for demo_id in demo_ids:
         mp4_path = os.path.join(dataset_dir, f"{demo_id}.mp4")
         demo_output_dir = os.path.join(dataset_dir, demo_id)
         try:
             num_frames = unroll_mp4_into_latents(mp4_path, demo_output_dir, vae, gpu_id, cursor_image, cursor_alpha)
-        except:
+        except Exception as e:
+            print(f"failed to process {demo_id} with error {e}, continuing...")
             continue
         return_dict[demo_id] = num_frames
 
@@ -296,9 +297,9 @@ if __name__ == "__main__":
     
     # download mp4s and jsons with a bunch o' threads
     basedir, relpaths = d["basedir"], d["split1"]
-    relpaths = relpaths_to_download(relpaths, args.output_dir)
-    download_minecraft_data(basedir, relpaths, args.output_dir)
+    # relpaths = relpaths_to_download(relpaths, args.output_dir)
+    # download_minecraft_data(basedir, relpaths, args.output_dir)
 
     # use 2 procs (each with with a gpu) to precompute latents
-    # precompute_latents(args.output_dir)
+    precompute_latents(args.output_dir)
 
