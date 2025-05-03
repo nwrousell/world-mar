@@ -237,7 +237,8 @@ class WorldMAR(pl.LightningModule):
             order = np.array(list(range(self.frame_seq_len)))
             np.random.shuffle(order)
             orders.append(order)
-        orders = torch.Tensor(np.array(orders)).cuda().long()
+        # orders = torch.Tensor(np.array(orders)).cuda().long()
+        orders = torch.Tensor(np.array(orders)).to(self.device).long()
         return orders
 
     def random_masking(self, x, orders, random_offset=False):

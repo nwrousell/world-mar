@@ -234,7 +234,7 @@ class MinecraftDataset(Dataset):
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
-        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
+        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))[:5]
 
         for demo in self.demo_to_num_frames.keys():
             self.demo_to_num_frames[demo] -= 1
@@ -411,7 +411,6 @@ class MinecraftDataModule(L.LightningDataModule):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.batch_sz = batch_sz
-        print(self.batch_sz)
         self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
     def train_dataloader(self):
