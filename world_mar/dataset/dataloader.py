@@ -218,11 +218,11 @@ def composite_images_with_alpha(image1, image2, alpha, x, y):
     image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha)
 
 class MinecraftDataset(Dataset):
-    def __init__(self, dataset_dir, memory_frames=500, num_context_frames=5):
+    def __init__(self, dataset_dir, memory_distance=1000, memory_size=100, num_context_frames=5):
         self.dataset_dir = dataset_dir
-        self.memory_frames = memory_frames
+        self.memory_distance = memory_distance
+        self.memory_size = memory_size
         self.num_context_frames = num_context_frames
-        self.mem_indices = self._sample_mem_indices()
 
         # determine demonstration ids
         # unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
@@ -235,7 +235,7 @@ class MinecraftDataset(Dataset):
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
-        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
+        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))[:5]
 
         for demo in self.demo_to_num_frames.keys():
             self.demo_to_num_frames[demo] -= 1
@@ -273,20 +273,24 @@ class MinecraftDataset(Dataset):
 
         # generate points for monte-carlo memory retrieval
         self.points = generate_points_in_sphere(n_points=10_000, radius=30)
+        self.mem_indices = self._compute_mem_indices()
 
-    def _sample_mem_indices(self):
-        l = np.arange(-self.memory_frames, 0)
+    def _compute_mem_indices(self):
+        l = torch.arange(-self.memory_distance, 0, dtype=torch.float32)
+        lamb = 0.005
+        w = torch.exp(lamb * l)
+        w[-4:] += 1 # force prev. 4 frames
+        w = w / w.sum()
 
-        # pick a decay rate λ; larger λ ⇒ sharper focus on -1, smaller λ ⇒ more spread
-        lamb = 0.05
+        cdf = torch.cumsum(w, dim=0)
+        u = torch.linspace(1/(2*self.memory_size),
+                        1 - 1/(2*self.memory_size),
+                        self.memory_size)
 
-        # weights w[x] ∝ exp(λ * x)  (since x<0, this decays as x→-N)
-        w = np.exp(lamb * l)
-        w /= w.sum()
+        # torch.searchsorted finds insertion points i such that cdf[i-1] < u <= cdf[i]
+        idx = torch.searchsorted(cdf, u)
 
-        mem_indices = np.random.choice(l, size=self.memory_frames, replace=False, p=w)
-        mem_indices = np.sort(mem_indices, -1)
-        return mem_indices
+        return l[idx].to(torch.int64)
 
     def _preprocess_demo_metadata(self, demo_id):
         with open(os.path.join(self.dataset_dir, f"{demo_id}.jsonl"), "rt") as f:
@@ -332,6 +336,7 @@ class MinecraftDataset(Dataset):
 
         action_matrix = torch.stack(action_vectors)
         pose_matrix = torch.stack(pose_vectors, axis=0)
+        is_gui_open = torch.tensor(is_gui_open)
 
         return { "action_matrix": action_matrix, "pose_matrix": pose_matrix, "is_gui_open": is_gui_open, "mouse_pos": mouse_pos }
     
@@ -362,15 +367,19 @@ class MinecraftDataset(Dataset):
         action, target_pose = action_matrix[frame_idx-1], pose_matrix[frame_idx]
 
         # sample K context frames using monte-carlo overlap
-        start_memory_idx = max(0, frame_idx-self.memory_frames)
+        cur_mem_indices = frame_idx + self.mem_indices
+        # TODO: add spatial heuristic filter
+        cur_mem_indices = cur_mem_indices[cur_mem_indices >= 0]
+        cur_mem_indices = cur_mem_indices[~is_gui_open[cur_mem_indices]] # filter out frames where the GUI is open
         context_indices = get_most_relevant_poses_to_target(
             target_pose=target_pose, 
-            other_poses=pose_matrix[start_memory_idx:frame_idx], 
+            other_poses=pose_matrix[cur_mem_indices], 
             points=self.points, 
             min_overlap=0.1, 
             k=self.num_context_frames,
         )
-        context_indices = [i + max(0, frame_idx-self.memory_frames) for i in context_indices]  # convert back to trajectory indices
+        # convert back to trajectory indices
+        context_indices = cur_mem_indices[context_indices]
 
         frame_indices = torch.tensor([frame_idx] + context_indices)
 
@@ -381,18 +390,8 @@ class MinecraftDataset(Dataset):
         # read frames from disk
         frames = []
         for frame_i in frame_indices:
-            # frame_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_i:06d}.jpg")
             latent_path = os.path.join(self.dataset_dir, demo_id, f"frame{frame_i:06d}.bin")
             latent = torch.tensor(np.fromfile(latent_path, np.float32).reshape(576, 16))
-            # frame = torch.tensor(cv2.imread(frame_path))
-            # frame = frame[..., [2, 1, 0]] # BGR --> RGB
-
-            # draw cursor on frame if GUI is open
-            # if is_gui_open[frame_i]:
-            #     camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
-            #     cursor_x = int(mouse_pos[frame_i]["x"] * camera_scaling_factor)
-            #     cursor_y = int(mouse_pos[frame_i]["y"] * camera_scaling_factor)
-            #     composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
             frames.append(latent)
 
         # add padding frames if necessary
@@ -436,9 +435,11 @@ class MinecraftDataModule(L.LightningDataModule):
 
 
 if __name__ == "__main__":
-    dm = MinecraftDataModule(dataset_dir="/users/nrousell/scratch/minecraft-raw")
-    # dataset = MinecraftDataset(dataset_dir="/users/nrousell/scratch/minecraft-raw")
+    # dm = MinecraftDataModule(dataset_dir="/users/nrousell/scratch/minecraft-raw")
+    dataset = MinecraftDataset(dataset_dir="/users/nrousell/scratch/minecraft-raw", num_context_frames=4)
     # dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4)
+
+    batch = dataset.__getitem__(50)
 
     # loader = DataLoader(dataset, batch_size=64, num_workers=0)
 

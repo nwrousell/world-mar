@@ -97,6 +97,13 @@ def unroll_mp4_into_latents(mp4_path: str, output_folder: str, vae, gpu_id) -> i
     if not cap.isOpened():
         raise IOError(f"Cannot open video {mp4_path}")
 
+    # TODO: draw cursor when GUI is open
+    # if is_gui_open[frame_i]:
+    #     camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
+    #     cursor_x = int(mouse_pos[frame_i]["x"] * camera_scaling_factor)
+    #     cursor_y = int(mouse_pos[frame_i]["y"] * camera_scaling_factor)
+    #     composite_images_with_alpha(frame, self.cursor_image, self.cursor_alpha, cursor_x, cursor_y)
+
     frame_idx = 0
     BATCH_SIZE = 128
     frames = []
