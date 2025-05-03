@@ -84,18 +84,24 @@ def main(args):
         ckpt_path = find_latest_checkpoint(args.resume)
     print(f"Initialized logging directory: {logdir}")
 
-    train_data = MinecraftDataModule(dataset_dir=args.data_dir)
-
-    # load model
+    # load model and dataloader from config
     model_cfg = cfg.model
     model_cfg.params.vae_config = None # destroy vae_config so it doesn't load the vae
     model = instantiate_from_config(model_cfg)
     print("Loaded model")
+    dataloader_cfg = cfg.dataloader
+    dataloader = instantiate_from_config(dataloader_cfg)
+    print("Loaded dataloader")
 
+    # set the learning rate of the model
     model.learning_rate = model_cfg.learning_rate
+    print(f"Set initial learning rate to: {model.learning_rate}")
+
+    # get the callback functions for each batch
     callbacks = get_callbacks(logdir)
 
     if torch.cuda.is_available():
+        print("CUDA available; printing GPU info:")
         num_devices = torch.cuda.device_count()
         accelerator = "gpu"
         model.learning_rate *= num_devices
@@ -104,6 +110,7 @@ def main(args):
         for i in range(torch.cuda.device_count()):
             print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
     else:
+        print("CUDA unavailable; running on CPU.")
         num_devices = 1
         accelerator = "cpu"
 
@@ -114,7 +121,7 @@ def main(args):
     )
 
     print("Starting training...")
-    trainer.fit(model, train_dataloaders=train_data, ckpt_path = ckpt_path)
+    trainer.fit(model, train_dataloaders=dataloader, ckpt_path = ckpt_path)
 
 if __name__ == '__main__':
     parser = ArgumentParser()
