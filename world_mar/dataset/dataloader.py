@@ -222,6 +222,7 @@ class MinecraftDataset(Dataset):
         self.dataset_dir = dataset_dir
         self.memory_frames = memory_frames
         self.num_context_frames = num_context_frames
+        self.mem_indices = self._sample_mem_indices()
 
         # determine demonstration ids
         # unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
@@ -272,6 +273,20 @@ class MinecraftDataset(Dataset):
 
         # generate points for monte-carlo memory retrieval
         self.points = generate_points_in_sphere(n_points=10_000, radius=30)
+
+    def _sample_mem_indices(self):
+        l = np.arange(-self.memory_frames, 0)
+
+        # pick a decay rate λ; larger λ ⇒ sharper focus on -1, smaller λ ⇒ more spread
+        lamb = 0.05
+
+        # weights w[x] ∝ exp(λ * x)  (since x<0, this decays as x→-N)
+        w = np.exp(lamb * l)
+        w /= w.sum()
+
+        mem_indices = np.random.choice(l, size=self.memory_frames, replace=False, p=w)
+        mem_indices = np.sort(mem_indices, -1)
+        return mem_indices
 
     def _preprocess_demo_metadata(self, demo_id):
         with open(os.path.join(self.dataset_dir, f"{demo_id}.jsonl"), "rt") as f:
