@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --nodes=1               # node count
-#SBATCH -n 4                    # number of cores
+#SBATCH -n 12                    # number of cores
 #SBATCH -p gpu --gres=gpu:a5000:2
-#SBATCH --mem=60G               # total memory per node (4 GB per cpu-core is default)
+#SBATCH --mem=100G               # total memory per node (4 GB per cpu-core is default)
 #SBATCH -t 24:00:00             # total run time limit (HH:MM:SS)
 #SBATCH --mail-type=end         # send email when job ends
 #SBATCH --mail-user=noah_rousell@brown.edu

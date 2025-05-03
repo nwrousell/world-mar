@@ -192,42 +192,29 @@ def download_video_and_action_files(basedir: str, relpath: str, pbar):
     pbar.update(1)
     print(f"Finished downloading {outpath}")
 
-def download_minecraft_data(json_file: str, num_demos: int, output_dir: str):
-    global num_total_frames
-    global demonstration_id_to_num_frames
-    num_total_frames = 0
-    demonstration_id_to_num_frames = {}
-    with open(json_file, "r") as f:
+def get_paths(index_path: str, output_dir: str, num_demos: int):
+    with open(index_path, "r") as f:
         data = f.read()
     data = eval(data)
     basedir = data["basedir"]
     relpaths = data["relpaths"]
 
-    # filter out demonstrations we already have downloaded
-    # unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
-    # unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
-    # relpaths = filter(lambda r:r.split(".")[0].split("/")[-1] not in already_present, relpaths)
+    relpaths = random.sample(relpaths, num_demos)
+    relpaths = relpaths_to_download(relpaths, output_dir)
+    return basedir, relpaths
 
-    if args.num_demos is not None:
-        # relpaths = relpaths[:args.num_demos]
-        relpaths = random.sample(relpaths, num_demos)
+def download_minecraft_data(basedir: str, relpaths: list[str], output_dir: str):
+    global num_total_frames
+    global demonstration_id_to_num_frames
+    num_total_frames = 0
+    demonstration_id_to_num_frames = {}
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    relpaths = relpaths_to_download(relpaths, output_dir)
-    
+
     with ThreadPoolExecutor(MAX_THREADS) as executor:
         with tqdm(total=len(relpaths), desc="Downloading Files") as pbar:
             executor.map(lambda rp: download_video_and_action_files(basedir, rp, pbar), relpaths)
-    
-
-    # print(f"total frames: {num_total_frames}")
-    # counts_dict = { 
-    #     "total_frames": num_total_frames,
-    #     "demonstration_id_to_num_frames": demonstration_id_to_num_frames
-    # }
-    # with open(os.path.join(output_dir, "counts.json"), "wt") as f:
-    #     json.dump(counts_dict, f)
 
 def worker(gpu_id, demo_ids, dataset_dir, return_dict):
     torch.cuda.set_device(f"cuda:{gpu_id}")
@@ -271,8 +258,25 @@ def precompute_latents(dataset_dir: str):
     }
     with open(os.path.join(dataset_dir, "counts.json"), "wt") as f:
         json.dump(counts_dict, f)
-   
+
+def download_and_precompute_latents(dataset_dir, basedir, relpaths):
+    # download mp4s and jsons with a bunch o' threads
+    download_minecraft_data(basedir, relpaths, dataset_dir)
+
+    # use 2 procs (each with with a gpu) to precompute latents
+    precompute_latents(dataset_dir)
+
 if __name__ == "__main__":
     args = parser.parse_args()
-    # download_minecraft_data(args.json_file, args.num_demos, args.output_dir)
-    precompute_latents(args.output_dir)
+    
+    # basedir, relpaths = get_paths(args.json_file, args.output_dir, args.num_demos)
+    # relpaths = list(relpaths)
+    # d = {
+    #     "basedir": basedir,
+    #     "split1": relpaths[::2],
+    #     "split2": relpaths[1::2]
+    # }
+    with open("splits.json", "rt") as f:
+        d = json.load(f)
+
+    download_and_precompute_latents(args.output_dir, d["basedir"], d["split1"])
