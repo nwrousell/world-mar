@@ -43,8 +43,8 @@ CONFIG_PATH = "configs/world_mar.yaml"
 
 def relpaths_to_download(relpaths, output_dir):
     def read_json(file_name):
-        with open(file_name.replace('mp4', 'jsonl'), 'r') as json_file:
-            text = json.loads('['+''.join(json_file.readlines()).replace('\n', ',')+']')
+        with open(file_name, 'r') as json_file:
+            text = json.loads('['+','.join(json_file.readlines())+']')
 
     data_path = '/'.join(relpaths[0].split('/')[:-1])
     non_defect=[]
@@ -54,7 +54,8 @@ def relpaths_to_download(relpaths, output_dir):
             read_json(vid_name.replace('mp4', 'jsonl'))
             if vid.isOpened():
                 non_defect.append(os.path.join(data_path, vid_name.split('/')[-1]))
-        except:
+        except Exception as e:
+            # print(f"{vid_name}: {e}")
             continue
 
     relpaths = set(relpaths)
@@ -261,6 +262,9 @@ def precompute_latents(dataset_dir: str):
 
 def download_and_precompute_latents(dataset_dir, basedir, relpaths):
     # download mp4s and jsons with a bunch o' threads
+    print("num total:", len(relpaths))
+    relpaths = relpaths_to_download(relpaths, dataset_dir)
+    print("num to download:", len(relpaths))
     download_minecraft_data(basedir, relpaths, dataset_dir)
 
     # use 2 procs (each with with a gpu) to precompute latents
