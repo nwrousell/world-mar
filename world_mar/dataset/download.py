@@ -105,8 +105,8 @@ def unroll_mp4_into_latents(mp4_path: str, output_folder: str, vae, gpu_id) -> i
             break  # End of video
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_rgb = frame_rgb.astype(np.float32) / 255.0
-        frames.append(torch.tensor(frame_rgb).permute(2,0,1)) # (360, 640, 3)
+        frame_rgb = (frame_rgb.astype(np.float32) / 255.0) * 2 - 1 # bring to [-1, 1]
+        frames.append(torch.tensor(frame_rgb).permute(2,0,1)) # bring to (3, 360, 640)
 
         if len(frames) == BATCH_SIZE:
             batch = torch.stack(frames).to(f"cuda:{gpu_id}")

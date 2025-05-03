@@ -87,6 +87,7 @@ def main(args):
 
     # load model
     model_cfg = cfg.model
+    model_cfg.params.vae_config = None # destroy vae_config so it doesn't load the vae
     model = instantiate_from_config(model_cfg)
 
     model.learning_rate = model_cfg.learning_rate

@@ -46,7 +46,7 @@ class WorldMAR(pl.LightningModule):
     """
     def __init__(
         self, 
-        vae_config, # should be an AutoencoderKL 
+        vae_config=None, # should be an AutoencoderKL 
         img_height=360, img_width=640, num_frames=5,
         patch_size=2, token_embed_dim=16,
         vae_seq_h=18, vae_seq_w=32,
@@ -145,11 +145,12 @@ class WorldMAR(pl.LightningModule):
         self.diffusion_batch_mul = diffusion_batch_mul
 
         # ----- intialize the vae -----
-        # self.instantiate_vae(vae_config)
-        # assert isinstance(self.vae, AutoencoderKL)
-        # self.vae_embed_dim = self.vae.latent_dim
-        # assert self.vae.latent_dim == token_embed_dim
-        # assert self.vae.seq_h == vae_seq_h & self.vae.seq_w == vae_seq_w
+        if vae_config:
+            self.instantiate_vae(vae_config)
+            assert isinstance(self.vae, AutoencoderKL)
+            self.vae_embed_dim = self.vae.latent_dim
+            assert self.vae.latent_dim == token_embed_dim
+            assert self.vae.seq_h == vae_seq_h and self.vae.seq_w == vae_seq_w
 
         self.vae_seq_h = 18
         self.vae_seq_w = 32
@@ -161,6 +162,21 @@ class WorldMAR(pl.LightningModule):
         torch.nn.init.kaiming_normal_(self.diffusion_pos_emb_learned)
         self.num_frames = num_frames
     
+    @staticmethod
+    def load_filtered_checkpoint(filepath, map_location=None, **kwargs):
+        checkpoint = torch.load(filepath, map_location=map_location)
+        # Remove vae weights
+        state_dict = checkpoint['state_dict']
+        filtered_state_dict = {
+            k: v for k, v in state_dict.items() if not k.startswith('vae')
+        }
+        checkpoint['state_dict'] = filtered_state_dict
+
+        # Now load the module
+        model = WorldMAR(**kwargs)
+        model.load_state_dict(filtered_state_dict, strict=False)
+        return model
+
     def initialize_weights(self):
         torch.nn.init.kaiming_normal_(self.pred_token)
         torch.nn.init.kaiming_normal_(self.ctx_token)
@@ -198,15 +214,18 @@ class WorldMAR(pl.LightningModule):
         return x  # [bsz, h, w, d]
 
     def unpatchify(self, x):
+        # b (h w) d -> b d/p**2 (h p w p)
+        
         bsz = x.shape[0]
         p = self.patch_size
         c = self.vae_embed_dim
         h_, w_ = self.seq_h, self.seq_w
 
         x = x.reshape(bsz, h_, w_, c, p, p)
-        x = torch.einsum('nhwcpq->nchpwq', x)
-        x = x.reshape(bsz, c, h_ * p, w_ * p) # TODO: this should probably be changed for optim
-        return x  # [bsz, c, h, w]
+        # x = torch.einsum('nhwcpq->nchpwq', x) # (n, h, w, c, p, q)  →  (n, c, h, p, w, q)
+        x = rearrange(x, "n h w c p q -> n h p w q c")
+        x = x.reshape(bsz, h_ * p * w_ * p, c)
+        return x  # [bsz, c, (h w)]
     
     def sample_orders(self, bsz):
         orders = []
@@ -440,11 +459,13 @@ class WorldMAR(pl.LightningModule):
 
         # --- parse batch ---
         # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
-        frames = format_image(batch["frames"].to(self.device)) # shape [B, T, H, W, C]
+        frames = batch["frames"].to(self.device) # shape [B, T, H, W, C]
         batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
         actions = batch["action"].to(self.device) # shape [B, 25]
         poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
         timestamps = batch["timestamps"].to(self.device) # shape [B, T]
+
+        start = time()
 
         # --- construct padding_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
@@ -461,9 +482,10 @@ class WorldMAR(pl.LightningModule):
 
         opt.step()
         lr_sched.step()
+        end = time()
 
         # end = time()
-        # print(f"backprop: {end - start}")
+        print(f"forward & backward pass: {end - start}")
     
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
@@ -478,35 +500,39 @@ class WorldMAR(pl.LightningModule):
             }
         }
 
-    def sample(self, x, actions, poses, timestamps):
+    def sample(self, x, actions, poses, timestamps, batch_nframes):
         
         # --- parse batch ---
         # assume the layout is [PREV_FRAME, CTX_FRAMES ...]
-        frames = format_image(batch["frames"].to(self.device)) # shape [B, T, H, W, C]
-        batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
-        actions = batch["action"].to(self.device) # shape [B, 25]
-        poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
-        timestamps = batch["timestamps"].to(self.device) # shape [B, T]
+        # frames = format_image(batch["frames"].to(self.device)) # shape [B, T, H, W, C]
+        # batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
+        # actions = batch["action"].to(self.device) # shape [B, 25]
+        # poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
+        # timestamps = batch["timestamps"].to(self.device) # shape [B, T]
 
         # --- construct padding_mask ---
-        B, L = len(frames), self.num_frames * self.frame_seq_len
+        B, L = len(x), self.num_frames * self.frame_seq_len
         # assert not torch.any(batch_nframes > self.num_frames)
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
-        z, mask = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask)
+        z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask)
 
-        # split into tgt frame + diffuse
-        batch_idx = torch.arange(b, device=self.device)
-        z_t = z[batch_idx, offsets] # b h w d
+        # grab tokens for [MASK] frame
+        batch_idx = torch.arange(B, device=self.device)
+        z_mask = z[batch_idx, offsets] # b h w d
         # xt_gt = x_gt[batch_idx, offsets] # b h w d
 
         # diffuse
-        z = z + self.diffusion_pos_emb_learned
-        z = rearrange(z, "b h w d -> (b h w) d")
+        z_mask = z_mask + self.diffusion_pos_emb_learned
+        z_mask = rearrange(z_mask, "b h w d -> (b h w) d")
         
         # bc we're predicting on all masked at once, this is pretty simple
-        patch_preds = self.diffloss.sample_ddim(z, cfg=1.0)
+        start = time()
+        patch_preds = self.diffloss.sample_ddim(z_mask, cfg=1.0) # (b h w) d
+        end = time()
+        patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
+        # print("out:", patch_preds.shape, end - start)
         x_pred = self.unpatchify(patch_preds)
 
         return x_pred

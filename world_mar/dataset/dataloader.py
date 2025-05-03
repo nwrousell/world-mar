@@ -329,7 +329,8 @@ class MinecraftDataset(Dataset):
         raise Exception(f"out of bounds - idx: {idx}, len: {self.__len__()}, start_frame: {start_frame}, n_usable_frames: {n_usable_frames}")
 
     def __len__(self) -> int:
-        return self.total_frames - len(self.demo_to_metadata.keys()) * 2 # we can't sample first frames cause we won't have context
+        return sum([self.demo_to_num_frames[demo_id] for demo_id in self.unique_ids]) - len(self.unique_ids)
+        # return self.total_frames - len(self.demo_to_metadata.keys()) * 2 # we can't sample first frames cause we won't have context
 
     def __getitem__(self, idx):
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
@@ -410,39 +411,27 @@ class MinecraftDataModule(L.LightningDataModule):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.batch_sz = batch_sz
+        print(self.batch_sz)
         self.dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_frames=memory_frames, num_context_frames=num_context_frames)
     
     def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=1, shuffle=True)
+        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=8, shuffle=True)
     
     def val_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=1, shuffle=True)
+        return DataLoader(self.dataset, batch_size=self.batch_sz, num_workers=8, shuffle=True)
 
 
 if __name__ == "__main__":
-    dataset = MinecraftDataset(dataset_dir="/users/nrousell/scratch/minecraft-raw")
+    dm = MinecraftDataModule(dataset_dir="/users/nrousell/scratch/minecraft-raw")
+    # dataset = MinecraftDataset(dataset_dir="/users/nrousell/scratch/minecraft-raw")
     # dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4)
 
-    loader = DataLoader(dataset, batch_size=64, num_workers=0)
+    # loader = DataLoader(dataset, batch_size=64, num_workers=0)
 
-
-    #for num_workers in [0, 2, 4, 8, 16]:
+    # for num_workers in [12, 0, 2, 4, 8, 16]:
     #    loader = DataLoader(dataset, batch_size=64, num_workers=num_workers)
     #    start = time()
     #    for i, batch in enumerate(loader):
     #        if i == 10:
     #            break
     #    print(f"Workers: {num_workers}, Time: {time() - start:.2f}s")
-
-    # print("len:", len(dataloader))
-    # start = time()
-    # batch = next(iter(dataloader))
-    # end = time()
-    # print(end - start)
-    # for k, v in batch.items():
-    #     print(k, v.shape)
-
-# Workers: 0, Time: 13.35s
-# Workers: 2, Time: 25.62s
-# Workers: 4, Time: 15.32s
-# Workers: 8, Time: 13.29s
