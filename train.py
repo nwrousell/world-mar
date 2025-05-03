@@ -107,6 +107,8 @@ def main(args):
     model.vae.to("cpu")
     print("Loaded model")
     dataloader_cfg = cfg.dataloader
+    if args.data_dir:
+        dataloader_cfg.dataset_dir = args.data_dir
     dataloader = instantiate_from_config(dataloader_cfg)
     print("Loaded dataloader")
 
@@ -155,6 +157,13 @@ if __name__ == '__main__':
         required=True,
         type=str,
         help="path to config"
+    )
+    parser.add_argument(
+        "-d",
+        "--data-dir",
+        default="",
+        type=str,
+        help="path to data dir"
     )
     parser.add_argument(
         "-r",

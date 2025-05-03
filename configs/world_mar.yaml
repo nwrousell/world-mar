@@ -10,8 +10,8 @@ model:
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
   params:
-    dataset_dir: "/users/nrousell/scratch/minecraft-7x/"
-    batch_sz: 32
+    dataset_dir: "../minecraft-raw/"
+    batch_sz: 64
     memory_distance: 1000
     memory_size: 100
     train_split: 0.99 # 0.01 for val
