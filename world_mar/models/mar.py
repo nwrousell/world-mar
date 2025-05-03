@@ -54,9 +54,11 @@ class WorldMAR(pl.LightningModule):
         encoder_depth=8, encoder_num_heads=8,
         decoder_depth=8, decoder_num_heads=8,
         diffloss_w=256, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
+        mask_random_frame=False,
         mask_ratio_min=0.7,
         proj_dropout=0.1,
         attn_dropout=0.1,
+        gradient_clip_val=1.0,
         warmup_steps=10000, # TODO: change this depending on dataset size
         **kwargs
     ):
@@ -66,11 +68,13 @@ class WorldMAR(pl.LightningModule):
         action_dim = 25
         embedding_hidden_dim = 128
         self.warmup_steps = warmup_steps
+        self.gradient_clip_val = gradient_clip_val
         self.seq_h, self.seq_w = vae_seq_h // patch_size, vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
+        self.mask_random_frame = mask_random_frame
         self.mask_ratio_gen = stats.truncnorm((mask_ratio_min -1.0) / 0.25, 0, loc=1.0, scale=0.25)
 
         # ----- global embeddings -----
@@ -418,7 +422,7 @@ class WorldMAR(pl.LightningModule):
         # 2) gen mask
         b, t, h, w, d = x.shape
         orders = self.sample_orders(b)
-        mask, offsets = self.random_masking(x, orders) # b hw, b
+        mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame) # b hw, b
         pad_mask = rearrange(mask, "b (h w) -> b h w", h=h)
         pad_mask = torch.cat([pad_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
         pad_mask = rearrange(pad_mask, "b h w -> b (h w)")
@@ -476,9 +480,16 @@ class WorldMAR(pl.LightningModule):
         # --- forward + backprop ---
         loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.manual_backward(loss)
 
-        # start = time()
+        # --- clip gradients, backwards, step
+        # def max_gradients(params):
+        #     return max([p.grad.abs().max().item() for p in params if p.grad is not None], default=0.0)
+        
+        self.manual_backward(loss)
+        # print(f"(Before clipping) Maximum of gradients: {max_gradients(self.parameters())}")
+        grad_update_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.gradient_clip_val, norm_type=2)
+        # print(f"(After clipping) Maximum of gradients: {max_gradients(self.parameters())}")
+        # print(f"Total norm of gradient update vector: {grad_update_norm}")
 
         opt.step()
         lr_sched.step()
