@@ -159,6 +159,13 @@ if __name__ == '__main__':
         help="path to config"
     )
     parser.add_argument(
+        "-d",
+        "--data-dir",
+        default="",
+        type=str,
+        help="path to data dir"
+    )
+    parser.add_argument(
         "-r",
         "--resume",
         default="",
