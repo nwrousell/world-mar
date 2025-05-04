@@ -218,7 +218,7 @@ def composite_images_with_alpha(image1, image2, alpha, x, y):
     image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha)
 
 class MinecraftDataset(Dataset):
-    def __init__(self, dataset_dir, memory_distance=1000, memory_size=100, num_context_frames=5, toy=False):
+    def __init__(self, dataset_dir, memory_distance=1000, memory_size=100, num_context_frames=5, toy=False, old_dataset=False):
         self.dataset_dir = dataset_dir
         self.memory_distance = memory_distance
         self.memory_size = memory_size
@@ -232,14 +232,16 @@ class MinecraftDataset(Dataset):
         # self.unique_ids = sorted(unique_ids)
 
         # read counts metadata
+
         with open(os.path.join(dataset_dir, "counts.json"), "rt") as f:
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
-        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
+        self.demo_ids = sorted(list(self.demo_to_num_frames.keys()))
 
-        # for demo in self.demo_to_num_frames.keys():
-        #     self.demo_to_num_frames[demo] -= 1
+        if old_dataset:
+            for demo in self.demo_to_num_frames.keys():
+                self.demo_to_num_frames[demo] -= 1
 
         # construct demo_id -> start_frame map (or grab from cache)
         # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
@@ -253,7 +255,8 @@ class MinecraftDataset(Dataset):
         self.demo_to_metadata = {}
         current_frame = 0
         start = time()
-        for demo_id in self.unique_ids:
+
+        for demo_id in self.demo_ids:
             self.demo_to_start_frame[demo_id] = current_frame
             current_frame += self.demo_to_num_frames[demo_id] - 1
 
@@ -350,7 +353,7 @@ class MinecraftDataset(Dataset):
         raise Exception(f"out of bounds - idx: {idx}, len: {self.__len__()}, start_frame: {start_frame}, n_usable_frames: {n_usable_frames}")
 
     def __len__(self) -> int:
-        return sum([self.demo_to_num_frames[demo_id] for demo_id in self.unique_ids]) - len(self.unique_ids)
+        return sum([self.demo_to_num_frames[demo_id] for demo_id in self.demo_ids]) - len(self.demo_ids)
         # return self.total_frames - len(self.demo_to_metadata.keys()) * 2 # we can't sample first frames cause we won't have context
 
     def __getitem__(self, idx):
@@ -366,6 +369,7 @@ class MinecraftDataset(Dataset):
             self.demo_to_metadata[demo_id]["is_gui_open"],
             self.demo_to_metadata[demo_id]["mouse_pos"],
         )
+
         action, target_pose = action_matrix[frame_idx-1], pose_matrix[frame_idx]
 
         # sample K context frames using monte-carlo overlap
@@ -388,8 +392,10 @@ class MinecraftDataset(Dataset):
                 k=self.num_context_frames,
             )
 
-        # convert back to trajectory indices
-        context_indices = cur_mem_indices[context_indices]
+            # convert back to trajectory indices
+            context_indices = cur_mem_indices[context_indices]
+        
+        # Concatenate the context indices to the target frame index
         frame_indices = torch.cat([torch.tensor([frame_idx]), context_indices])
 
         # convert poses to plucker
@@ -430,12 +436,12 @@ class MinecraftDataset(Dataset):
         }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, batch_sz=64, memory_distance=1000, memory_size=100, num_context_frames=4, train_split=0.9, num_workers=8):
+    def __init__(self, dataset_dir: str, batch_sz=64, memory_distance=1000, memory_size=100, num_context_frames=4, train_split=0.9, num_workers=8, toy=False, old_dataset=False):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.batch_sz = batch_sz
         self.num_workers = num_workers
-        dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_distance=memory_distance, memory_size=memory_size, num_context_frames=num_context_frames)
+        dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_distance=memory_distance, memory_size=memory_size, num_context_frames=num_context_frames, toy=toy, old_dataset=old_dataset)
         self.train_dataset, self.val_dataset = torch.utils.data.random_split(dataset, [train_split, 1-train_split])
     
     def train_dataloader(self):
