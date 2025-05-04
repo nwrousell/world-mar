@@ -374,7 +374,7 @@ class MinecraftDataset(Dataset):
 
         # sample K context frames using monte-carlo overlap
         if self.toy:
-            context_indices = [frame_idx for i in range(self.num_context_frames)]
+            context_indices = torch.tensor([frame_idx for i in range(self.num_context_frames)])
         else:
             cur_mem_indices = frame_idx + self.mem_indices
             # TODO: add spatial heuristic filter
