@@ -241,9 +241,9 @@ class WorldMAR(pl.LightningModule):
         orders = torch.Tensor(np.array(orders)).to(self.device).long()
         return orders
 
-    def random_masking(self, x, orders, random_offset=False):
+    def random_masking(self, x, orders, random_offset=False, masking_rate=None):
         bsz= x.shape[0]
-        mask_rate = self.mask_ratio_gen.rvs(1)[0]
+        mask_rate = self.mask_ratio_gen.rvs(1)[0] if not masking_rate else masking_rate
         num_masked_tokens = int(np.ceil(self.frame_seq_len * mask_rate))
         mask = torch.zeros(bsz, self.frame_seq_len, dtype=bool, device=x.device)
         # TODO: consider moving this offset to any frame?
