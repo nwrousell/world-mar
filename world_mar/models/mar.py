@@ -75,7 +75,7 @@ class WorldMAR(pl.LightningModule):
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
         self.mask_random_frame = mask_random_frame
-        self.mask_ratio_gen = stats.truncnorm((mask_ratio_min -1.0) / 0.25, 0, loc=1.0, scale=0.25)
+        self.mask_ratio_gen = stats.truncnorm((mask_ratio_min - 1.0) / 0.25, 0, loc=1.0, scale=0.25)
 
         # ----- global embeddings -----
         self.pose_embedder = nn.Sequential(
@@ -147,6 +147,7 @@ class WorldMAR(pl.LightningModule):
             num_sampling_steps=num_sampling_steps
         )
         self.diffusion_batch_mul = diffusion_batch_mul
+        self.scale_factor = 0.09
 
         # ----- intialize the vae -----
         if vae_config:
@@ -411,7 +412,7 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def _compute_z_and_mask(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
+    def masked_encoder_decoder(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
         b = x.shape[0]
 
         # 1) patchify latents
@@ -443,15 +444,19 @@ class WorldMAR(pl.LightningModule):
 
     def forward(self, x, actions, poses, timestamps, padding_mask=None):
         b = x.shape[0]
+
+        # scale the input tensor x to a standard normal distribution
+        x *= self.scale_factor
         
-        z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask)
+        # pass through the main masked spatio-temporal attention mechanism
+        z, mask, offsets, x_gt = self.masked_encoder_decoder(x, actions, poses, timestamps, padding_mask)
 
         # split into tgt frame + diffuse
         batch_idx = torch.arange(b, device=self.device)
         z_t = z[batch_idx, offsets] # b h w d
         xt_gt = x_gt[batch_idx, offsets] # b h w d
 
-        loss = self.forward_diffusion(z_t, xt_gt, mask)        
+        loss = self.forward_diffusion(z_t, xt_gt, mask)   
 
         return loss
 
@@ -528,7 +533,6 @@ class WorldMAR(pl.LightningModule):
         }
 
     def sample(self, x, actions, poses, timestamps, batch_nframes):
-        
         # --- parse batch ---
         # assume the layout is [PREV_FRAME, CTX_FRAMES ...]
         # frames = format_image(batch["frames"].to(self.device)) # shape [B, T, H, W, C]
@@ -539,11 +543,15 @@ class WorldMAR(pl.LightningModule):
 
         # --- construct padding_mask ---
         B, L = len(x), self.num_frames * self.frame_seq_len
+
+        # scale the input tensor x to match a standard normal distribution
+        x *= self.scale_factor
+
         # assert not torch.any(batch_nframes > self.num_frames)
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
-        z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask)
+        z, mask, offsets, x_gt = self.masked_encoder_decoder(x, actions, poses, timestamps, padding_mask=padding_mask, masking_rate=1.0)
 
         # grab tokens for [MASK] frame
         batch_idx = torch.arange(B, device=self.device)
@@ -561,6 +569,9 @@ class WorldMAR(pl.LightningModule):
         patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
         # print("out:", patch_preds.shape, end - start)
         x_pred = self.unpatchify(patch_preds)
+
+        # undo the scaling operation done to the input tensor (recover the original range of values)
+        x_pred /= self.scale_factor
 
         return x_pred
 
