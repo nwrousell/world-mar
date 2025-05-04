@@ -25,15 +25,6 @@ from time import time
 seed = 42
 torch.manual_seed(seed)
 
-def mask_by_order(mask_len, order, bsz, seq_len):
-    """
-    Returns a boolean mask where the *first* `mask_len` indices of `order`
-    are marked True. All others are False.
-    """
-    masking = torch.zeros(bsz, seq_len)
-    masking.scatter_(1, order[:, :mask_len.item()], True)  # in-place set
-    return masking
-
 class WorldMAR(pl.LightningModule):
     """
     Assumptions Praccho's making:
@@ -71,6 +62,7 @@ class WorldMAR(pl.LightningModule):
         self.gradient_clip_val = gradient_clip_val
         self.seq_h, self.seq_w = vae_seq_h // patch_size, vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
+        self.scale_factor = 0.08
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
@@ -228,6 +220,7 @@ class WorldMAR(pl.LightningModule):
         x = x.reshape(bsz, h_, w_, c, p, p)
         # x = torch.einsum('nhwcpq->nchpwq', x) # (n, h, w, c, p, q)  →  (n, c, h, p, w, q)
         x = rearrange(x, "n h w c p q -> n h p w q c")
+        x = x.reshape(bsz, h_ * p, w_ * p, c)
         x = x.reshape(bsz, h_ * p * w_ * p, c)
         return x  # [bsz, (h w), c]
     
@@ -336,6 +329,8 @@ class WorldMAR(pl.LightningModule):
             x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
 
         x = self.encoder_norm(x) 
+        if torch.isnan(x).any():
+            print("NAN DETECTED")
 
         return x  # (B, T, H+1, W, D)
 
@@ -443,6 +438,7 @@ class WorldMAR(pl.LightningModule):
 
     def forward(self, x, actions, poses, timestamps, padding_mask=None):
         b = x.shape[0]
+        x = x * self.scale_factor
         
         z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask)
 
@@ -539,6 +535,7 @@ class WorldMAR(pl.LightningModule):
 
         # --- construct padding_mask ---
         B, L = len(x), self.num_frames * self.frame_seq_len
+        x = x * self.scale_factor
         # assert not torch.any(batch_nframes > self.num_frames)
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
@@ -556,11 +553,12 @@ class WorldMAR(pl.LightningModule):
         
         # bc we're predicting on all masked at once, this is pretty simple
         start = time()
-        patch_preds = self.diffloss.sample_ddim(z_mask, cfg=1.0) # (b h w) d
+        patch_preds = self.diffloss.sample(z_mask) # (b h w) d
+        print(f"max patch_pred {patch_preds.max().cpu().item()}")
         end = time()
         patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
         # print("out:", patch_preds.shape, end - start)
-        x_pred = self.unpatchify(patch_preds)
+        x_pred = self.unpatchify(patch_preds) / self.scale_factor 
 
         return x_pred
 
