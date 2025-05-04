@@ -10,7 +10,7 @@ model:
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
   params:
-    dataset_dir: "../minecraft_seq_tiny/"
+    dataset_dir: "../minecraft-raw/"
     batch_sz: 128
     memory_distance: 1000
     memory_size: 100

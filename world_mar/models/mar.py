@@ -62,7 +62,7 @@ class WorldMAR(pl.LightningModule):
         self.gradient_clip_val = gradient_clip_val
         self.seq_h, self.seq_w = vae_seq_h // patch_size, vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
-        self.scale_factor = 0.08
+        self.scale_factor = 0.09
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
@@ -406,7 +406,7 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def _compute_z_and_mask(self, x, actions, poses, timestamps, padding_mask=None):
+    def _compute_z_and_mask(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
         b = x.shape[0]
 
         # 1) patchify latents
@@ -418,7 +418,7 @@ class WorldMAR(pl.LightningModule):
         # 2) gen mask
         b, t, h, w, d = x.shape
         orders = self.sample_orders(b)
-        mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame) # b hw, b
+        mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate) # b hw, b
         pad_mask = rearrange(mask, "b (h w) -> b h w", h=h)
         pad_mask = torch.cat([pad_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
         pad_mask = rearrange(pad_mask, "b h w -> b (h w)")
@@ -540,7 +540,7 @@ class WorldMAR(pl.LightningModule):
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
-        z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask)
+        z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask, masking_rate=1.0)
 
         # grab tokens for [MASK] frame
         batch_idx = torch.arange(B, device=self.device)
