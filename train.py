@@ -45,7 +45,7 @@ class ImageLogger(pl.Callback):
             to_decode = torch.cat([latents[:, 4], latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
             pl_module.vae.to("cuda")
             with torch.autocast(device_type="cuda", enabled=False):
-                one, two, three, four, five, six = (((pl_module.vae.decode(to_decode) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=3, dim=0) # each are n c h w
+                one, two, three, four, five, six = (((pl_module.vae.decode(to_decode) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=6, dim=0) # each are n c h w
             pl_module.vae.to("cpu")
 
             trifolds = torch.cat([one, two, three, four, five, six], dim=-1) # concat along width dim
