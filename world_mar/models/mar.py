@@ -411,7 +411,7 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def _compute_z_and_mask(self, x, actions, poses, timestamps, padding_mask=None):
+    def _compute_z_and_mask(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
         b = x.shape[0]
 
         # 1) patchify latents
@@ -424,19 +424,19 @@ class WorldMAR(pl.LightningModule):
         b, t, h, w, d = x.shape
         orders = self.sample_orders(b)
         mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame) # b hw, b
-        pad_mask = rearrange(mask, "b (h w) -> b h w", h=h)
-        pad_mask = torch.cat([pad_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
-        pad_mask = rearrange(pad_mask, "b h w -> b (h w)")
+        spatial_mask = rearrange(mask, "b (h w) -> b h w", h=h)
+        spatial_mask = torch.cat([spatial_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
+        spatial_mask = rearrange(spatial_mask, "b h w -> b (h w)")
 
         # 3) construct attn_masks
         (s_attn_mask_enc, t_attn_mask_enc, 
-         s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, pad_mask, offsets, padding_mask=padding_mask)
+         s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, spatial_mask, offsets, padding_mask=padding_mask)
 
         # 4) run encoder
         x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
 
         # 5) run decoder
-        z = self.forward_decoder(x, actions, poses, timestamps, pad_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        z = self.forward_decoder(x, actions, poses, timestamps, spatial_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
         return z, mask, offsets, x_gt
