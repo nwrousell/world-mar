@@ -43,7 +43,8 @@ class STBlock(nn.Module):
             dim=dim,
             heads=num_heads,
             dim_head=dim // num_heads,
-            rotary_emb=spatial_rotary_emb 
+            rotary_emb=spatial_rotary_emb, 
+            attn_drop=attn_drop, 
         )
         self.s_norm2 = norm_layer(dim)
         self.s_mlp = mlp_layer(
@@ -60,7 +61,8 @@ class STBlock(nn.Module):
             dim=dim,
             heads=num_heads,
             dim_head=dim // num_heads,
-            rotary_emb=temporal_rotary_emb 
+            rotary_emb=temporal_rotary_emb,
+            attn_drop=attn_drop, 
         )
         self.t_norm2 = norm_layer(dim)
         self.t_mlp = mlp_layer(
@@ -89,6 +91,7 @@ class TemporalAxialAttention(nn.Module):
         heads: int,
         dim_head: int,
         rotary_emb: RotaryEmbedding,
+        attn_drop=0.0,
     ):
         super().__init__()
         self.inner_dim = dim_head * heads
@@ -98,6 +101,7 @@ class TemporalAxialAttention(nn.Module):
         self.to_qkv = nn.Linear(dim, self.inner_dim * 3, bias=False)
         self.to_out = nn.Linear(self.inner_dim, dim)
         self.rotary_emb = rotary_emb
+        self.attn_drop = attn_drop
 
     def forward(self, x: torch.Tensor, attn_mask=None):
         B, T, H, W, D = x.shape
@@ -113,7 +117,7 @@ class TemporalAxialAttention(nn.Module):
 
         q, k, v = map(lambda t: t.contiguous(), (q, k, v))
 
-        x = F.scaled_dot_product_attention(query=q, key=k, value=v, attn_mask=attn_mask)
+        x = F.scaled_dot_product_attention(query=q, key=k, value=v, attn_mask=attn_mask, dropout_p=self.attn_drop)
 
         x = rearrange(x, "(B H W) h T d -> B T H W (h d)", B=B, H=H, W=W)
         x = x.to(q.dtype)
@@ -130,6 +134,7 @@ class SpatialAxialAttention(nn.Module):
         heads: int,
         dim_head: int,
         rotary_emb: RotaryEmbedding,
+        attn_drop=0.0,
     ):
         super().__init__()
         self.inner_dim = dim_head * heads
@@ -139,6 +144,7 @@ class SpatialAxialAttention(nn.Module):
         self.to_qkv = nn.Linear(dim, self.inner_dim * 3, bias=False)
         self.to_out = nn.Linear(self.inner_dim, dim)
         self.rotary_emb = rotary_emb
+        self.attn_drop = attn_drop
 
     def forward(self, x: torch.Tensor, attn_mask=None):
         B, T, H, W, D = x.shape
@@ -158,7 +164,7 @@ class SpatialAxialAttention(nn.Module):
         k = rearrange(k, "(B T) h H W d -> (B T) h (H W) d", B=B, T=T, h=self.heads)
         v = rearrange(v, "(B T) h H W d -> (B T) h (H W) d", B=B, T=T, h=self.heads)
 
-        x = F.scaled_dot_product_attention(query=q, key=k, value=v, attn_mask=attn_mask)
+        x = F.scaled_dot_product_attention(query=q, key=k, value=v, attn_mask=attn_mask, dropout_p=self.attn_drop)
 
         x = rearrange(x, "(B T) h (H W) d -> B T H W (h d)", B=B, H=H, W=W)
         x = x.to(q.dtype)
