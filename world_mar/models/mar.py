@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LinearLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from einops import rearrange
 from world_mar.modules.attention import STBlock
 from world_mar.modules.embeddings.timestep_embedding import TimestepEmbedder
@@ -45,12 +45,12 @@ class WorldMAR(pl.LightningModule):
         encoder_depth=8, encoder_num_heads=8,
         decoder_depth=8, decoder_num_heads=8,
         diffloss_w=256, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
-        mask_random_frame=False,
+        mask_random_frame=False, prev_masking_rate=0.5,
         mask_ratio_min=0.7,
         proj_dropout=0.1,
         attn_dropout=0.1,
         gradient_clip_val=1.0,
-        warmup_steps=10000, # TODO: change this depending on dataset size
+        warmup_steps=13500, # TODO: change this depending on dataset size
         **kwargs
     ):
         super().__init__()
@@ -68,6 +68,7 @@ class WorldMAR(pl.LightningModule):
         # ref: masking ratio used by MAR for image gen
         self.mask_random_frame = mask_random_frame
         self.mask_ratio_gen = stats.truncnorm((mask_ratio_min -1.0) / 0.25, 0, loc=1.0, scale=0.25)
+        self.prev_masking_rate = prev_masking_rate
 
         # ----- global embeddings -----
         self.pose_embedder = nn.Sequential(
@@ -246,9 +247,17 @@ class WorldMAR(pl.LightningModule):
             offsets = torch.randint(high=self.num_frames, size=bsz, dtype=torch.int64, device=self.device)
         else:
             offsets = torch.zeros(bsz, dtype=torch.int64, device=x.device)
-        mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
+        pred_mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
                              src=torch.ones(bsz, self.frame_seq_len, dtype=bool, device=x.device))
-        return mask, offsets # b hw, b
+        if self.training and not random_offset:
+            # gen the prev mask
+            prev_mask = torch.scatter(mask, dim=-1, index=orders[:, :int(len(orders)*self.prev_masking_rate)],
+                                      src=torch.ones(bsz, self.frame_seq_len, dtype=bool, device=x.device))
+        else:
+            prev_mask = None
+
+
+        return pred_mask, prev_mask, offsets # b hw, b
 
     def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False):
         B, T, H, W, D = x.shape
@@ -372,14 +381,17 @@ class WorldMAR(pl.LightningModule):
         loss = self.diffloss(z=z, target=tgt, mask=mask)
         return loss
 
-    def construct_attn_masks(self, x, mask, offsets, padding_mask=None):
+    def construct_attn_masks(self, x, mask, offsets, prev_mask=None, padding_mask=None):
         b, t, h, w, d = x.shape
         batch_idx = torch.arange(b, device=self.device)
 
         # --- spatial attn mask ---
         valid_hw = torch.ones(b, t, (h+1)*w, dtype=torch.bool, device=self.device)
-        if padding_mask is not None:
+        if not padding_mask:
             valid_hw &= padding_mask.unsqueeze(-1)
+        # if prev_mask:
+        #     offsets_prev = torch.ones_like(offsets, dtype=torch.int64, device=self.device)
+        #     valid_hw[batch_idx, offsets_prev] = ~prev_mask
         s_attn_mask_dec = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
         s_attn_mask_dec = rearrange(s_attn_mask_dec, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
         valid_hw[batch_idx, offsets] = ~mask
@@ -418,14 +430,14 @@ class WorldMAR(pl.LightningModule):
         # 2) gen mask
         b, t, h, w, d = x.shape
         orders = self.sample_orders(b)
-        mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate) # b hw, b
-        pad_mask = rearrange(mask, "b (h w) -> b h w", h=h)
+        pred_mask, prev_mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate) # b hw, b
+        pad_mask = rearrange(pred_mask, "b (h w) -> b h w", h=h)
         pad_mask = torch.cat([pad_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
         pad_mask = rearrange(pad_mask, "b h w -> b (h w)")
 
         # 3) construct attn_masks
         (s_attn_mask_enc, t_attn_mask_enc, 
-         s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, pad_mask, offsets, padding_mask=padding_mask)
+         s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, pad_mask, offsets, prev_mask=prev_mask, padding_mask=padding_mask)
 
         # 4) run encoder
         x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
@@ -434,7 +446,7 @@ class WorldMAR(pl.LightningModule):
         z = self.forward_decoder(x, actions, poses, timestamps, pad_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
-        return z, mask, offsets, x_gt
+        return z, pred_mask, offsets, x_gt
 
     def forward(self, x, actions, poses, timestamps, padding_mask=None):
         b = x.shape[0]
@@ -512,12 +524,27 @@ class WorldMAR(pl.LightningModule):
 
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
-        lr_sched = LinearLR(optim, start_factor=1.0/5, end_factor=1.0, total_iters=self.warmup_steps)
+        warmup_sched = LinearLR(
+            optim,
+            start_factor=1e-1,   # or 0.0
+            end_factor=1.0,
+            total_iters=self.warmup_steps
+        )
+        cosine_sched = CosineAnnealingLR(
+            optim,
+            T_max=self.warmup_steps * 50 - self.warmup_steps,
+            eta_min=0.0
+        )
+        scheduler = SequentialLR(
+            optim,
+            schedulers=[warmup_sched, cosine_sched],
+            milestones=[self.warmup_steps]
+        )
 
         return {
             "optimizer": optim,
             "lr_scheduler": {
-                "scheduler": lr_sched,
+                "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
             }

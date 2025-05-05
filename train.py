@@ -12,7 +12,7 @@ from torchvision.io import read_image
 from einops import rearrange
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -22,7 +22,7 @@ from world_mar.dataset.dataloader import MinecraftDataModule
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=1000):
+    def __init__(self, log_every_n_steps=500):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -64,7 +64,8 @@ def get_callbacks(logdir):
             monitor="val_loss",
             mode="min"
         ),
-        ImageLogger()
+        ImageLogger(),
+        LearningRateMonitor(logging_interval='step')
     ]
 
 def find_latest_checkpoint(logdir):
