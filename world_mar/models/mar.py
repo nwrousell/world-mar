@@ -229,6 +229,7 @@ class WorldMAR(pl.LightningModule):
         x = x.reshape(bsz, h_, w_, c, p, p)
         # x = torch.einsum('nhwcpq->nchpwq', x) # (n, h, w, c, p, q)  →  (n, c, h, p, w, q)
         x = rearrange(x, "n h w c p q -> n h p w q c")
+        x = x.reshape(bsz, h_ * p, w_ * p, c)
         x = x.reshape(bsz, h_ * p * w_ * p, c)
         return x  # [bsz, (h w), c]
     
@@ -424,7 +425,7 @@ class WorldMAR(pl.LightningModule):
         # 2) gen mask
         b, t, h, w, d = x.shape
         orders = self.sample_orders(b)
-        mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame) # b hw, b
+        mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate) # b hw, b
         spatial_mask = rearrange(mask, "b (h w) -> b h w", h=h)
         spatial_mask = torch.cat([spatial_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
         spatial_mask = rearrange(spatial_mask, "b h w -> b (h w)")
