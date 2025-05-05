@@ -251,7 +251,7 @@ class WorldMAR(pl.LightningModule):
                              src=torch.ones(bsz, self.frame_seq_len, dtype=bool, device=x.device))
         if self.training and not random_offset:
             # gen the prev mask
-            prev_mask = torch.scatter(mask, dim=-1, index=orders[:, :int(len(orders)*self.prev_masking_rate)],
+            prev_mask = torch.scatter(mask, dim=-1, index=orders[:, :int(num_masked_tokens*self.prev_masking_rate)],
                                       src=torch.ones(bsz, self.frame_seq_len, dtype=bool, device=x.device))
         else:
             prev_mask = None
@@ -387,11 +387,11 @@ class WorldMAR(pl.LightningModule):
 
         # --- spatial attn mask ---
         valid_hw = torch.ones(b, t, (h+1)*w, dtype=torch.bool, device=self.device)
-        if not padding_mask:
+        if padding_mask is not None:
             valid_hw &= padding_mask.unsqueeze(-1)
-        # if prev_mask:
-        #     offsets_prev = torch.ones_like(offsets, dtype=torch.int64, device=self.device)
-        #     valid_hw[batch_idx, offsets_prev] = ~prev_mask
+        if prev_mask is not None:
+            offsets_prev = torch.ones_like(offsets, dtype=torch.int64, device=self.device)
+            valid_hw[batch_idx, offsets_prev] = ~prev_mask
         s_attn_mask_dec = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
         s_attn_mask_dec = rearrange(s_attn_mask_dec, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
         valid_hw[batch_idx, offsets] = ~mask
@@ -401,16 +401,18 @@ class WorldMAR(pl.LightningModule):
 
         # --- temporal attn mask ---
         valid_t = torch.ones(b, (h+1)*w, t, dtype=torch.bool, device=self.device)
-        if padding_mask is not None:
-            valid_t &= padding_mask.unsqueeze(1)
-        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
-        t_attn_mask_dec = rearrange(t_attn_mask_dec, "b hw t1 t2 -> (b hw) 1 t1 t2")
-
         _, l, _ = valid_t.shape
-
         batch_idx = batch_idx.unsqueeze(1).expand(-1, l)
         len_idx   = torch.arange(l, device=valid_t.device).unsqueeze(0).expand(b, -1)
         depth_idx = offsets.unsqueeze(1).expand(-1, l)
+        if padding_mask is not None:
+            valid_t &= padding_mask.unsqueeze(1)
+        if prev_mask is not None:
+            prev_depth_idx = offsets_prev.unsqueeze(1).expand(-1, l)
+            valid_t[batch_idx[prev_mask], len_idx[prev_mask], prev_depth_idx[prev_mask]] = False
+        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
+        t_attn_mask_dec = rearrange(t_attn_mask_dec, "b hw t1 t2 -> (b hw) 1 t1 t2")
+
         valid_t[batch_idx[mask], len_idx[mask], depth_idx[mask]] = False
         
         t_attn_mask_enc = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
@@ -434,6 +436,10 @@ class WorldMAR(pl.LightningModule):
         pad_mask = rearrange(pred_mask, "b (h w) -> b h w", h=h)
         pad_mask = torch.cat([pad_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
         pad_mask = rearrange(pad_mask, "b h w -> b (h w)")
+        if prev_mask is not None:
+            prev_mask = rearrange(prev_mask, "b (h w) -> b h w", h=h)
+            prev_mask = torch.cat([prev_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
+            prev_mask = rearrange(prev_mask, "b h w -> b (h w)")
 
         # 3) construct attn_masks
         (s_attn_mask_enc, t_attn_mask_enc, 
@@ -526,7 +532,7 @@ class WorldMAR(pl.LightningModule):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
         warmup_sched = LinearLR(
             optim,
-            start_factor=1e-1,   # or 0.0
+            start_factor=2e-1,   # or 0.0
             end_factor=1.0,
             total_iters=self.warmup_steps
         )
