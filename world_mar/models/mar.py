@@ -101,7 +101,7 @@ class WorldMAR(pl.LightningModule):
         self.patch_size = patch_size
         self.token_embed_dim = token_embed_dim * patch_size**2
         self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
-        self.z_proj_ln = nn.LayerNorm(st_embed_dim, eps=1e-6)
+        self.z_proj_ln = nn.LayerNorm(st_embed_dim, eps=1e-4)
         # special tokens [PRED] and [CTX]
         self.pred_token = nn.Parameter(torch.zeros(1, st_embed_dim))
         self.ctx_token = nn.Parameter(torch.zeros(1, st_embed_dim))
@@ -113,8 +113,6 @@ class WorldMAR(pl.LightningModule):
                 spatial_rotary_emb=self.enc_spatial_rotary_embedder,
                 temporal_rotary_emb=self.enc_temporal_rotary_embedder
             ) for _ in range(encoder_depth)])
-        # layer normalization
-        self.encoder_norm = nn.LayerNorm(st_embed_dim)
 
         # ----- decoder -----
         # special token [MASK] for selected tokens that decoder should in-paint
@@ -127,8 +125,6 @@ class WorldMAR(pl.LightningModule):
                 spatial_rotary_emb=self.dec_spatial_rotary_embedder,
                 temporal_rotary_emb=self.dec_temporal_rotary_embedder
             ) for _ in range(decoder_depth)])
-        # layer normalization
-        self.decoder_norm = nn.LayerNorm(st_embed_dim)
 
         # ----- pose prediction -----
         # TODO: add pose prediction network, throw into training
@@ -278,7 +274,7 @@ class WorldMAR(pl.LightningModule):
         timestamp_embeddings = timestamp_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
 
         # return the latent with the embeddings added
-        x[:, :, :H, :, :] += pose_embeddings + timestamp_embeddings  # (B, T, H or H+1, W, D)
+        x[:, :, :H, :, :] = x[:, :, :H, :, :] + pose_embeddings + timestamp_embeddings   # (B, T, H or H+1, W, D)
         return x
 
     def add_pred_action_and_ctx_embeddings(self, x, actions, is_decoder=False):
@@ -312,7 +308,7 @@ class WorldMAR(pl.LightningModule):
             # add [ACTION] tokens to x[:, 1, H:, :, :] (extra buffer for second elements along temporal dim)
             # add [CTX] tokens to x[:, 2:, H:, :, :] (extra buffer for third, fourth, fifth, ... elements along temporal dim)
             tokens = torch.cat([pred_token_buffer, action_token_buffer, ctx_token_buffer], dim=-4)  # (B, T, 1, W, D)
-            x[:, :, H:, :, :] += tokens  # (B, T, H+1, W, D)
+            x[:, :, H:, :, :] = x[:, :, H:, :, :] + tokens                                          # (B, T, H+1, W, D)
 
         return x  # (B, T, H+1, W, D)
 
@@ -320,23 +316,20 @@ class WorldMAR(pl.LightningModule):
         # x:       (B, T, H, W, token_embed_dim)
         # actions: (B, 25)
         # poses:   (B, T, 40H, 40W, 6)
-        # TODO: double check this actually does across last dim
-        x = self.z_proj(x)  # (B, T, H, W, D)
+
+        # project and layer normalize
+        x = self.z_proj(x)                                                # (B, T, H, W, D)
+        x = self.z_proj_ln(x)                                             # (B, T, H, W, D)
 
         # add pose and timestamp embeddings
         x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps)  # (B, T, H, W, D)
 
         # add token buffers for prediction, action (on prev frame), and context (on memory frames)
-        x = self.add_pred_action_and_ctx_embeddings(x, actions)  # (B, T, H+1, W, D)
+        x = self.add_pred_action_and_ctx_embeddings(x, actions)           # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
-        # TODO: double check this actually does across last dim
-        x = self.z_proj_ln(x)
-
         for block in self.encoder_blocks:
             x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
-
-        x = self.encoder_norm(x) 
 
         return x  # (B, T, H+1, W, D)
 
@@ -351,22 +344,20 @@ class WorldMAR(pl.LightningModule):
         s_mask = mask.view(B, 1, H+1, W)
         t_mask = (torch.arange(T, device=self.device).unsqueeze(0) == offsets.unsqueeze(1)).view(B, T, 1, 1)
         full_mask = s_mask & t_mask
-        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)  # (B, T, H+1, W, D)
+        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                       # (B, T, H+1, W, D)
 
         # add pose and timestamp embeddings
         x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps, is_decoder=True)  # (B, T, H+1, W, D)
 
         # re-add [PRED], [ACTION], and [CTX] tokens to the token buffers
-        x = self.add_pred_action_and_ctx_embeddings(x, actions, is_decoder=True)  # (B, T, H+1, W, D)
+        x = self.add_pred_action_and_ctx_embeddings(x, actions, is_decoder=True)           # (B, T, H+1, W, D)
 
         # pass through each decoder spatio-temporal attention block
         for block in self.decoder_blocks:
-            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
-
-        x = self.decoder_norm(x)
+            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)                 # (B, T, H+1, W, D)
 
         # remove the extra token buffer that was concatenated by the encoder onto x's H dim
-        x = x[:, :, :H, :, :]
+        x = x[:, :, :H, :, :]                                                              # (B, T, H, W, D)
 
         return x  # (B, T, H, W, D)
     

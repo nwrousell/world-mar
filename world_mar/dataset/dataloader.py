@@ -231,9 +231,9 @@ class MinecraftDataset(Dataset):
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
         self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
 
-        # # Must also exclude the last frame in each video if using the old dataset
-        # for demo in self.demo_to_num_frames.keys():
-        #     self.demo_to_num_frames[demo] -= 1
+        # Must also exclude the last frame in each video if using the old dataset
+        for demo in self.demo_to_num_frames.keys():
+            self.demo_to_num_frames[demo] -= 1
 
         # construct demo_id -> start_frame map (or grab from cache)
         # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")

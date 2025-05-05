@@ -11,11 +11,9 @@ dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
   params:
     dataset_dir: "data/old-minecraft-dataset/"
-    batch_sz: 1
+    batch_sz: 48
     memory_distance: 1000
     memory_size: 100
     train_split: 0.99 # 0.01 for val
     num_context_frames: 4
-    toy: True
-    old_dataset: True
     
