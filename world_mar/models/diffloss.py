@@ -69,7 +69,7 @@ class DiffLoss(nn.Module):
             sample_fn, 
             noise.shape, 
             noise, 
-            clip_denoised=False, 
+            clip_denoised=True, 
             model_kwargs=model_kwargs, 
             progress=False,
             # temperature=temperature, 
@@ -107,7 +107,7 @@ class TimestepEmbedder(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
         freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / 2
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
         ).to(device=t.device)
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)

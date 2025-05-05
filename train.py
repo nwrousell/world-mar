@@ -23,6 +23,7 @@ LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
     def __init__(self, log_every_n_steps=500):
+
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 

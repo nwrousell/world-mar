@@ -860,7 +860,7 @@ class GaussianDiffusion:
             "xstart_mse": xstart_mse,
             "mse": mse,
         }
-
+    
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):
     """
