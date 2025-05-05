@@ -218,18 +218,11 @@ def composite_images_with_alpha(image1, image2, alpha, x, y):
     image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha)
 
 class MinecraftDataset(Dataset):
-    def __init__(self, dataset_dir, memory_distance=1000, memory_size=100, num_context_frames=5, toy=False, old_dataset=False):
+    def __init__(self, dataset_dir, memory_distance=1000, memory_size=100, num_context_frames=5):
         self.dataset_dir = dataset_dir
         self.memory_distance = memory_distance
         self.memory_size = memory_size
         self.num_context_frames = num_context_frames
-        self.toy = toy
-
-        # determine demonstration ids
-        # unique_ids = glob.glob(os.path.join(self.dataset_dir, "*.jsonl"))
-        # unique_ids = list(set([os.path.basename(x).split(".")[0] for x in unique_ids]))
-        # print(len(unique_ids))
-        # self.unique_ids = sorted(unique_ids)
 
         # read counts metadata
         with open(os.path.join(dataset_dir, "counts.json"), "rt") as f:
@@ -238,10 +231,9 @@ class MinecraftDataset(Dataset):
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
         self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
 
-        if old_dataset:
-            # Must also exclude the last frame in each video
-            for demo in self.demo_to_num_frames.keys():
-                self.demo_to_num_frames[demo] -= 1
+        # # Must also exclude the last frame in each video if using the old dataset
+        # for demo in self.demo_to_num_frames.keys():
+        #     self.demo_to_num_frames[demo] -= 1
 
         # construct demo_id -> start_frame map (or grab from cache)
         # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
@@ -263,10 +255,6 @@ class MinecraftDataset(Dataset):
             self.demo_to_metadata[demo_id] = self._preprocess_demo_metadata(demo_id)
 
         print(f"FINISHED PREPROCESSING ALL METADATA: {time() - start}")
-
-        d = {"demo_to_metadata": self.demo_to_metadata, "demo_to_start_frame": self.demo_to_start_frame}
-        # torch.save(d, cache_path)
-        # print(f"wrote metadata to {cache_path}")
 
         # prepare cursor image
         self.cursor_image = cv2.imread(CURSOR_FILE, cv2.IMREAD_UNCHANGED)
@@ -353,14 +341,9 @@ class MinecraftDataset(Dataset):
 
     def __len__(self) -> int:
         return sum([self.demo_to_num_frames[demo_id] for demo_id in self.unique_ids]) - len(self.unique_ids)
-        # return self.total_frames - len(self.demo_to_metadata.keys()) * 2 # we can't sample first frames cause we won't have context
 
     def __getitem__(self, idx):
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
-
-        if self.toy:
-            frame_idx = 1
-
         assert frame_idx > 0 and frame_idx < self.demo_to_num_frames[demo_id]
 
         action_matrix, pose_matrix, is_gui_open, mouse_pos = (
@@ -369,28 +352,23 @@ class MinecraftDataset(Dataset):
             self.demo_to_metadata[demo_id]["is_gui_open"],
             self.demo_to_metadata[demo_id]["mouse_pos"],
         )
-
         action, target_pose = action_matrix[frame_idx-1], pose_matrix[frame_idx]
 
         # sample K context frames using monte-carlo overlap
-        if self.toy:
-            context_indices = torch.tensor([frame_idx for i in range(self.num_context_frames)])
-        else:
-            cur_mem_indices = frame_idx + self.mem_indices
-            # TODO: add spatial heuristic filter
-            cur_mem_indices = cur_mem_indices[cur_mem_indices >= 0]
-            cur_mem_indices = cur_mem_indices[~is_gui_open[cur_mem_indices]] # filter out frames where the GUI is open
-            if len(cur_mem_indices) == 0 or cur_mem_indices[-1] != frame_idx-1:
-                cur_mem_indices = torch.cat([cur_mem_indices, torch.tensor([frame_idx-1])])
-            context_indices = get_most_relevant_poses_to_target(
-                target_pose=target_pose, 
-                other_poses=pose_matrix[cur_mem_indices], 
-                points=self.points, 
-                min_overlap=0.1, 
-                k=self.num_context_frames,
-            )
-            # convert back to trajectory indices
-            context_indices = cur_mem_indices[context_indices]
+        cur_mem_indices = frame_idx + self.mem_indices
+        cur_mem_indices = cur_mem_indices[cur_mem_indices >= 0]
+        cur_mem_indices = cur_mem_indices[~is_gui_open[cur_mem_indices]] # filter out frames where the GUI is open
+        if len(cur_mem_indices) == 0 or cur_mem_indices[-1] != frame_idx-1:
+            cur_mem_indices = torch.cat([cur_mem_indices, torch.tensor([frame_idx-1])])
+        context_indices = get_most_relevant_poses_to_target(
+            target_pose=target_pose, 
+            other_poses=pose_matrix[cur_mem_indices], 
+            points=self.points, 
+            min_overlap=0.1, 
+            k=self.num_context_frames,
+        )
+        # convert back to trajectory indices
+        context_indices = cur_mem_indices[context_indices]
 
         # concatenate target frame and context frame indices
         frame_indices = torch.cat([torch.tensor([frame_idx]), context_indices])
@@ -418,10 +396,7 @@ class MinecraftDataset(Dataset):
             frame_indices = torch.cat([frame_indices, torch.full((num_padding,), -1)])
 
         frames = torch.stack(frames, axis=0)
-
         assert len(frames) == self.num_context_frames + 1
-        # print("returning:", frames.shape, plucker.shape, action.shape, frame_indices.shape)
-
         timestamps = frame_indices - frame_idx
 
         return {
@@ -433,19 +408,12 @@ class MinecraftDataset(Dataset):
         }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, batch_sz=64, memory_distance=1000, memory_size=100, num_context_frames=4, train_split=0.9, num_workers=8, toy=False, old_dataset=False):
+    def __init__(self, dataset_dir: str, batch_sz=64, memory_distance=1000, memory_size=100, num_context_frames=4, train_split=0.9, num_workers=8):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.batch_sz = batch_sz
         self.num_workers = num_workers
-        dataset = MinecraftDataset(
-            dataset_dir=dataset_dir, 
-            memory_distance=memory_distance, 
-            memory_size=memory_size, 
-            num_context_frames=num_context_frames, 
-            toy=toy, 
-            old_dataset=old_dataset
-        )
+        dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_distance=memory_distance, memory_size=memory_size, num_context_frames=num_context_frames)
         self.train_dataset, self.val_dataset = torch.utils.data.random_split(dataset, [train_split, 1-train_split])
     
     def train_dataloader(self):

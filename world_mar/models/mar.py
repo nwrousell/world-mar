@@ -341,7 +341,7 @@ class WorldMAR(pl.LightningModule):
         return x  # (B, T, H+1, W, D)
 
     def forward_decoder(self, x, actions, poses, timestamps, mask, offsets, s_attn_mask=None, t_attn_mask=None):
-        # x:       (B, T, H+1, W, D) 
+        # x:       (B, T, H+1, W, D)
         # mask:    (B, HW)
         # offsets: (B)
         B, T, H, W, D = x.shape
