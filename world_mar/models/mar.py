@@ -25,15 +25,6 @@ from time import time
 seed = 42
 torch.manual_seed(seed)
 
-def mask_by_order(mask_len, order, bsz, seq_len):
-    """
-    Returns a boolean mask where the *first* `mask_len` indices of `order`
-    are marked True. All others are False.
-    """
-    masking = torch.zeros(bsz, seq_len)
-    masking.scatter_(1, order[:, :mask_len.item()], True)  # in-place set
-    return masking
-
 class WorldMAR(pl.LightningModule):
     """
     Assumptions Praccho's making:
@@ -71,6 +62,7 @@ class WorldMAR(pl.LightningModule):
         self.gradient_clip_val = gradient_clip_val
         self.seq_h, self.seq_w = vae_seq_h // patch_size, vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
+        self.scale_factor = 0.09
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
@@ -147,7 +139,6 @@ class WorldMAR(pl.LightningModule):
             num_sampling_steps=num_sampling_steps
         )
         self.diffusion_batch_mul = diffusion_batch_mul
-        self.scale_factor = 0.09
 
         # ----- intialize the vae -----
         if vae_config:
@@ -338,6 +329,8 @@ class WorldMAR(pl.LightningModule):
             x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
 
         x = self.encoder_norm(x) 
+        if torch.isnan(x).any():
+            print("NAN DETECTED")
 
         return x  # (B, T, H+1, W, D)
 
@@ -413,7 +406,7 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def masked_encoder_decoder(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
+    def _compute_z_and_mask(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
         b = x.shape[0]
 
         # 1) patchify latents
@@ -552,23 +545,19 @@ class WorldMAR(pl.LightningModule):
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
-        z, mask, offsets, x_gt = self.masked_encoder_decoder(x, actions, poses, timestamps, padding_mask=padding_mask, masking_rate=1.0)
+        z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask, masking_rate=1.0)
 
         # grab tokens for [MASK] frame
         batch_idx = torch.arange(B, device=self.device)
         z_mask = z[batch_idx, offsets] # b h w d
-        # xt_gt = x_gt[batch_idx, offsets] # b h w d
 
         # diffuse
         z_mask = z_mask + self.diffusion_pos_emb_learned
         z_mask = rearrange(z_mask, "b h w d -> (b h w) d")
         
         # bc we're predicting on all masked at once, this is pretty simple
-        start = time()
-        patch_preds = self.diffloss.sample_ddim(z_mask, cfg=1.0) # (b h w) d
-        end = time()
+        patch_preds = self.diffloss.sample(z_mask) # (b h w) d
         patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
-        # print("out:", patch_preds.shape, end - start)
         x_pred = self.unpatchify(patch_preds)
 
         # undo the scaling operation done to the input tensor (recover the original range of values)

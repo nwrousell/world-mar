@@ -40,6 +40,7 @@ parser = argparse.ArgumentParser(description="Download OpenAI contractor dataset
 # parser.add_argument("--json-file", type=str, required=True, help="Path to the index .json file")
 # parser.add_argument("--num-demos", type=int, default=None, help="Maximum number of demonstrations to download")
 parser.add_argument("--output-dir", type=str, required=True, help="Path to the output directory")
+parser.add_argument("--splits", type=str, default="splits.json", help="Path to splits JSON to download")
 
 CONFIG_PATH = "configs/world_mar.yaml"
 
@@ -311,14 +312,14 @@ if __name__ == "__main__":
     #     "split1": relpaths[::2],
     #     "split2": relpaths[1::2]
     # }
-    # with open("splits.json", "rt") as f:
-    #     d = json.load(f)
+    with open(args.splits, "rt") as f:
+        d = json.load(f)
     
     # download mp4s and jsons with a bunch o' threads
-    # basedir, relpaths = d["basedir"], d["split1"]
-    # relpaths = relpaths_to_download(relpaths, args.output_dir)
-    # download_minecraft_data(basedir, relpaths, args.output_dir)
+    basedir, relpaths = d["basedir"], d["split1"]
+    relpaths = relpaths_to_download(relpaths, args.output_dir)
+    download_minecraft_data(basedir, relpaths, args.output_dir)
 
     # use 2 procs (each with with a gpu) to precompute latents
-    # precompute_latents(args.output_dir)
+    precompute_latents(args.output_dir)
 
