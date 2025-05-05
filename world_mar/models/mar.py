@@ -446,17 +446,17 @@ class WorldMAR(pl.LightningModule):
         b = x.shape[0]
 
         # scale the input tensor x to a standard normal distribution
-        x *= self.scale_factor
+        x = x * self.scale_factor
         
         # pass through the main masked spatio-temporal attention mechanism
         z, mask, offsets, x_gt = self.masked_encoder_decoder(x, actions, poses, timestamps, padding_mask)
 
-        # split into tgt frame + diffuse
+        # split into target frame + diffuse
         batch_idx = torch.arange(b, device=self.device)
         z_t = z[batch_idx, offsets] # b h w d
         xt_gt = x_gt[batch_idx, offsets] # b h w d
 
-        loss = self.forward_diffusion(z_t, xt_gt, mask)   
+        loss = self.forward_diffusion(z_t, xt_gt, mask)        
 
         return loss
 
@@ -465,8 +465,6 @@ class WorldMAR(pl.LightningModule):
         lr_sched = self.lr_schedulers()
         opt.zero_grad()
 
-        # print("START OF TRAINING STEP")
-
         # --- parse batch ---
         # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
         frames = batch["frames"].to(self.device) # shape [B, T, H, W, C]
@@ -474,8 +472,6 @@ class WorldMAR(pl.LightningModule):
         actions = batch["action"].to(self.device) # shape [B, 25]
         poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
         timestamps = batch["timestamps"].to(self.device) # shape [B, T]
-
-        start = time()
 
         # --- construct padding_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
@@ -488,14 +484,8 @@ class WorldMAR(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         # --- clip gradients, backwards, step
-        # def max_gradients(params):
-        #     return max([p.grad.abs().max().item() for p in params if p.grad is not None], default=0.0)
-        
         self.manual_backward(loss)
-        # print(f"(Before clipping) Maximum of gradients: {max_gradients(self.parameters())}")
-        grad_update_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.gradient_clip_val, norm_type=2)
-        # print(f"(After clipping) Maximum of gradients: {max_gradients(self.parameters())}")
-        # print(f"Total norm of gradient update vector: {grad_update_norm}")
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.gradient_clip_val, norm_type=2)
 
         opt.step()
         lr_sched.step()
@@ -511,7 +501,6 @@ class WorldMAR(pl.LightningModule):
 
         # --- construct padding_mask ---
         B, L = len(frames), self.num_frames * self.frame_seq_len
-        # assert not torch.any(batch_nframes > self.num_frames)
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
@@ -545,7 +534,7 @@ class WorldMAR(pl.LightningModule):
         B, L = len(x), self.num_frames * self.frame_seq_len
 
         # scale the input tensor x to match a standard normal distribution
-        x *= self.scale_factor
+        x = x * self.scale_factor
 
         # assert not torch.any(batch_nframes > self.num_frames)
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
@@ -571,75 +560,6 @@ class WorldMAR(pl.LightningModule):
         x_pred = self.unpatchify(patch_preds)
 
         # undo the scaling operation done to the input tensor (recover the original range of values)
-        x_pred /= self.scale_factor
+        x_pred = x_pred / self.scale_factor
 
         return x_pred
-
-    # def sample_tokens(self, bsz, num_iter=64, labels=None, temperature=1.0, progress=False):
-
-    #     # init and sample generation orders
-    #     mask = torch.ones(bsz, self.seq_len).cuda()
-    #     tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
-    #     orders = self.sample_orders(bsz)
-
-    #     indices = list(range(num_iter))
-    #     if progress:
-    #         indices = tqdm(indices)
-    #     # generate latents
-    #     for step in indices:
-    #         cur_tokens = tokens.clone()
-
-    #         # class embedding and CFG
-    #         if labels is not None:
-    #             class_embedding = self.class_emb(labels)
-    #         else:
-    #             class_embedding = self.fake_latent.repeat(bsz, 1)
-    #         if not cfg == 1.0:
-    #             tokens = torch.cat([tokens, tokens], dim=0)
-    #             class_embedding = torch.cat([class_embedding, self.fake_latent.repeat(bsz, 1)], dim=0)
-    #             mask = torch.cat([mask, mask], dim=0)
-
-    #         # mae encoder
-    #         x = self.forward_mae_encoder(tokens, mask, class_embedding)
-
-    #         # mae decoder
-    #         z = self.forward_mae_decoder(x, mask)
-
-    #         # mask ratio for the next round, following MaskGIT and MAGE.
-    #         mask_ratio = np.cos(math.pi / 2. * (step + 1) / num_iter)
-    #         mask_len = torch.Tensor([np.floor(self.seq_len * mask_ratio)]).cuda()
-
-    #         # masks out at least one for the next iteration
-    #         mask_len = torch.maximum(torch.Tensor([1]).cuda(),
-    #                                  torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
-
-    #         # get masking for next iteration and locations to be predicted in this iteration
-    #         mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
-    #         if step >= num_iter - 1:
-    #             mask_to_pred = mask[:bsz].bool()
-    #         else:
-    #             mask_to_pred = torch.logical_xor(mask[:bsz].bool(), mask_next.bool())
-    #         mask = mask_next
-    #         if not cfg == 1.0:
-    #             mask_to_pred = torch.cat([mask_to_pred, mask_to_pred], dim=0)
-
-    #         # sample token latents for this step
-    #         z = z[mask_to_pred.nonzero(as_tuple=True)]
-    #         # cfg schedule follow Muse
-    #         if cfg_schedule == "linear":
-    #             cfg_iter = 1 + (cfg - 1) * (self.seq_len - mask_len[0]) / self.seq_len
-    #         elif cfg_schedule == "constant":
-    #             cfg_iter = cfg
-    #         else:
-    #             raise NotImplementedError
-    #         sampled_token_latent = self.diffloss.sample(z, temperature, cfg_iter)
-    #         if not cfg == 1.0:
-    #             sampled_token_latent, _ = sampled_token_latent.chunk(2, dim=0)  # Remove null class samples
-    #             mask_to_pred, _ = mask_to_pred.chunk(2, dim=0)
-
-    #         cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent
-    #         tokens = cur_tokens.clone()
-
-    #     # unpatchify
-    #     tokens = self.unpatchify(tokens)
-    #     return tokens
