@@ -69,7 +69,7 @@ class DiffLoss(nn.Module):
             sample_fn, 
             noise.shape, 
             noise, 
-            clip_denoised=False, 
+            clip_denoised=True, 
             model_kwargs=model_kwargs, 
             progress=False,
             # temperature=temperature, 

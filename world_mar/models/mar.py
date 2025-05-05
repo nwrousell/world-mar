@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LinearLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from einops import rearrange
 from world_mar.modules.attention import STBlock
 from world_mar.modules.embeddings.timestep_embedding import TimestepEmbedder
@@ -50,7 +50,7 @@ class WorldMAR(pl.LightningModule):
         proj_dropout=0.1,
         attn_dropout=0.1,
         gradient_clip_val=1.0,
-        warmup_steps=10000, # TODO: change this depending on dataset size
+        warmup_steps=13500, # TODO: change this depending on dataset size
         **kwargs
     ):
         super().__init__()
