@@ -12,7 +12,7 @@ from torchvision.io import read_image
 from einops import rearrange
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -22,7 +22,7 @@ from world_mar.dataset.dataloader import MinecraftDataModule
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=1000):
+    def __init__(self, log_every_n_steps=500):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -42,13 +42,13 @@ class ImageLogger(pl.Callback):
 
             # decode to frames
             # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
-            to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+            to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
             pl_module.vae.to("cuda")
             with torch.autocast(device_type="cuda", enabled=False):
-                one, two, three, four, five = (((pl_module.vae.decode(to_decode) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=5, dim=0) # each are n c h w
+                three, four, five = (((pl_module.vae.decode(to_decode).clip(-1,1) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=3, dim=0) # each are n c h w
             pl_module.vae.to("cpu")
 
-            trifolds = torch.cat([one, two, three, four, five], dim=-1) # concat along width dim
+            trifolds = torch.cat([three, four, five], dim=-1) # concat along width dim
 
             wandb_images = [wandb.Image(img) for img in trifolds]
 
@@ -64,7 +64,8 @@ def get_callbacks(logdir):
             monitor="val_loss",
             mode="min"
         ),
-        ImageLogger()
+        ImageLogger(),
+        LearningRateMonitor(logging_interval="step")
     ]
 
 def find_latest_checkpoint(logdir):

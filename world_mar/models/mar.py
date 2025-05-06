@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LinearLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from einops import rearrange
 from world_mar.modules.attention import STBlock
 from world_mar.modules.embeddings.timestep_embedding import TimestepEmbedder
@@ -50,7 +50,7 @@ class WorldMAR(pl.LightningModule):
         proj_dropout=0.1,
         attn_dropout=0.1,
         gradient_clip_val=1.0,
-        warmup_steps=10000, # TODO: change this depending on dataset size
+        warmup_steps=20000, # TODO: change this depending on dataset size
         **kwargs
     ):
         super().__init__()
@@ -93,7 +93,6 @@ class WorldMAR(pl.LightningModule):
         self.patch_size = patch_size
         self.token_embed_dim = token_embed_dim * patch_size**2
         self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
-        self.z_proj_ln = nn.LayerNorm(st_embed_dim, eps=1e-6)
         # special tokens [PRED] and [CTX]
         self.pred_token = nn.Parameter(torch.zeros(1, st_embed_dim))
         self.ctx_token = nn.Parameter(torch.zeros(1, st_embed_dim))
@@ -322,8 +321,6 @@ class WorldMAR(pl.LightningModule):
         x = self.add_pred_action_and_ctx_embeddings(x, actions)  # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
-        # TODO: double check this actually does across last dim
-        x = self.z_proj_ln(x)
 
         for block in self.encoder_blocks:
             x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
@@ -512,12 +509,26 @@ class WorldMAR(pl.LightningModule):
 
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
-        lr_sched = LinearLR(optim, start_factor=1.0/5, end_factor=1.0, total_iters=self.warmup_steps)
-
+        warmup_sched = LinearLR(
+             optim,
+             start_factor=4e-1,
+             end_factor=1.0,
+             total_iters=self.warmup_steps
+        )
+        cosine_sched = CosineAnnealingLR(
+            optim,
+            T_max=self.warmup_steps * 50 - self.warmup_steps,
+            eta_min=0.0
+        )
+        scheduler = SequentialLR(
+            optim,
+            schedulers=[warmup_sched, cosine_sched],
+            milestones=[self.warmup_steps]
+        )
         return {
             "optimizer": optim,
             "lr_scheduler": {
-                "scheduler": lr_sched,
+                "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
             }

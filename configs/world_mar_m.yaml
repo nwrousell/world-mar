@@ -1,12 +1,15 @@
 model:
-  learning_rate: 8e-5 # from MAR for img gen paper
+  learning_rate: 8e-4 # from MAR for img gen paper
   target: world_mar.models.mar.WorldMAR
   params:
     vae_config:
       target: world_mar.oasis_utils.vae.ViT_L_20_Shallow_Encoder 
       params:
         load_from_ckpt: checkpoints/oasis/vit-l-20.safetensors
-
+    encoder_depth: 12
+    decoder_depth: 12
+    num_frames: 4
+ 
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
   params:
@@ -15,4 +18,5 @@ dataloader:
     memory_distance: 1000
     memory_size: 100
     train_split: 0.99 # 0.01 for val
-    num_context_frames: 4
+    num_context_frames: 3
+    num_workers: 16

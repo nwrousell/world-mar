@@ -306,9 +306,14 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
     fov_half_h = torch.tensor(105 / 2, device=device)
     fov_half_v = torch.tensor(75 / 2, device=device)
 
-    target_pose = target_pose.clone().to(device)
+    # target_pose = target_pose.clone().to(device)
     other_poses = other_poses.clone().to(device)
-    points = points.clone().to(device)
+    # points = points.clone().to(device)
+
+    most_recent_frame_idx = other_poses.shape[0]-1
+    top_k = [most_recent_frame_idx] # force most recent frame to be in context
+
+    return torch.tensor(top_k)
 
     other_poses[:, :3] -= target_pose[:3]
     target_pose[:3] = torch.tensor([0,0,0])
