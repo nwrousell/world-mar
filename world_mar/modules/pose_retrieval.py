@@ -293,7 +293,7 @@ def is_inside_fovs_3d(points, centers, center_pitches, center_yaws, fov_half_h, 
     # Check if both horizontal and vertical angles are within their respective FOV limits
     return (diff_azimuth < fov_half_h) & (diff_elevation < fov_half_v)
 
-def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_overlap=0.05, k=3, do_optim=True, device="cpu"):
+def get_most_relevant_poses_to_target(target_pose, other_poses, points, num_prev_frames, min_overlap=0.05, k=3, do_optim=True, device="cpu"):
     """
     Returns the indices of up to k other_poses that have the most overlap with target_pose
 
@@ -303,55 +303,67 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, min_over
 
     :return: (k,) indices (may actually be less than k if there aren't enough frames with >min_overlap)
     """
+    # ----- setup ------
+    # compute camera FOV horizontal and vertical half-angles
     fov_half_h = torch.tensor(105 / 2, device=device)
     fov_half_v = torch.tensor(75 / 2, device=device)
 
+    # send tensors to the appropriate device
     target_pose = target_pose.clone().to(device)
     other_poses = other_poses.clone().to(device)
     points = points.clone().to(device)
 
+    # shift everything to a target-centered domain
     other_poses[:, :3] -= target_pose[:3]
     target_pose[:3] = torch.tensor([0,0,0])
 
-    in_fov1 = is_inside_fov_3d_hv(
-        points, 
-        target_pose[:3], 
-        target_pose[-2], 
-        target_pose[-1], 
-        fov_half_h, 
-        fov_half_v
-    )
+    # ----- compute overlap amounts -----
+    # points that are inside the target pose's FOV are True (otherwise False)
+    in_fov1 = is_inside_fov_3d_hv(points, target_pose[:3], target_pose[-2], target_pose[-1], fov_half_h, fov_half_v)
 
     if do_optim:
         points = points[in_fov1]
         in_fov1 = in_fov1[in_fov1]
 
     in_fov_list = torch.stack([
-        is_inside_fov_3d_hv(points, pc[:3], pc[-2], pc[-1], fov_half_h, fov_half_v)
-        for pc in other_poses
+        is_inside_fov_3d_hv(points, pose[:3], pose[-2], pose[-1], fov_half_h, fov_half_v)
+        for pose in other_poses
     ])
 
+    # compute the minimum number of new overlapping points inside the frustum
+    # that are required to select a frame as a valid memory frame
     min_overlap_points = in_fov1.sum() * min_overlap
 
-    most_recent_frame_idx = other_poses.shape[0]-1
-    top_k = [most_recent_frame_idx] # force most recent frame to be in context
-    in_fov1 = in_fov1 & ~in_fov_list[other_poses.shape[0]-1]
-    for _ in range(k-1):
+    # ----- retrieve up to k overlapping frames -----
+    # force the already selected prev frames to be retrieved
+    forced_prev_frame_indices = list(range(0, num_prev_frames))
+    top_k = forced_prev_frame_indices.copy()
+
+    for prev_frame_idx in forced_prev_frame_indices:
+        # directly carve out all points in the overlapping region; subsequent memory frame
+        # candidates will have to overlap different points to be considered
+        in_fov1 = in_fov1 & ~in_fov_list[prev_frame_idx]
+
+    for _ in range(k - len(forced_prev_frame_indices)):
+        # exit the retrieval loop if there aren't enough new points left
         if in_fov1.sum() < min_overlap_points:
             break
 
-        overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
-
         # add recency bias
+        overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
         confidence = overlap_ratio + torch.arange(other_poses.shape[0], 0, -1) / other_poses.shape[0] * (-0.2)
 
+        # effectively set the confidence of already selected frames to -inf so they
+        # won't be chosen again
         if len(top_k) > 0:
-            confidence[torch.tensor(top_k)] = -1e10
-        _, r_idx = torch.topk(confidence, k=1, dim=0)
-        top_k.append(r_idx[0])
+            confidence[torch.tensor(top_k)] = -1e10  
 
-        # directly remove overlapping region
-        in_fov1 = in_fov1 & ~in_fov_list[r_idx[0]]
+        _, retrieved_idx = torch.topk(confidence, k=1, dim=0)
+        top_k.append(retrieved_idx[0])
+
+        # directly carve out all points in the overlapping region; subsequent memory frame
+        # candidates will have to overlap different points to be considered
+        in_fov1 = in_fov1 & ~in_fov_list[retrieved_idx[0]]
 
     return torch.tensor(top_k)
 

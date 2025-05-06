@@ -218,31 +218,33 @@ def composite_images_with_alpha(image1, image2, alpha, x, y):
     image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha)
 
 class MinecraftDataset(Dataset):
-    def __init__(self, dataset_dir, memory_distance=1000, memory_size=100, num_context_frames=5):
+    def __init__(self, dataset_dir, memory_distance=1000, prev_distance=5, memory_size=100, num_mem_frames=2, num_prev_frames=2):
         self.dataset_dir = dataset_dir
+        # Window lengths defining how many frames are reserved for previous frame retrieval,
+        # and how many are reserved for memory frame retrieval
+        #
+        # ... | mem_distance | prev_distance | <-- index 0
+        #
+        # Sample num_mem_frames many frames from mem_distance window
+        # Sample num_prev_frames many frames from prev_distance window
+        # 
+        # As an optimization, only consider memory_size many frames
+        # for WorldMem style point-based overlap scores
         self.memory_distance = memory_distance
+        self.prev_distance = prev_distance
         self.memory_size = memory_size
-        self.num_context_frames = num_context_frames
+        self.num_prev_frames = num_prev_frames
+        self.num_mem_frames = num_mem_frames
+        self.num_context_frames = num_mem_frames + num_prev_frames
 
-        # read counts metadata
+        # read video frame counts metadata from json file
         with open(os.path.join(dataset_dir, "counts.json"), "rt") as f:
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
         self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
 
-        # Must also exclude the last frame in each video if using the old dataset
-        for demo in self.demo_to_num_frames.keys():
-            self.demo_to_num_frames[demo] -= 1
-
-        # construct demo_id -> start_frame map (or grab from cache)
-        # cache_path = os.path.join(self.dataset_dir, "cached_metadata.pth")
-        # if os.path.exists(cache_path):
-        #     # d = torch.load(cache_path)
-        #     self.demo_to_start_frame = d["demo_to_start_frame"]
-        #     self.demo_to_metadata = d["demo_to_metadata"]
-        #     print(f"loaded metadata from {cache_path}")
-        # else:
+        # create dictionaries for computing global and local frame indices
         self.demo_to_start_frame = {}
         self.demo_to_metadata = {}
         current_frame = 0
@@ -264,24 +266,42 @@ class MinecraftDataset(Dataset):
 
         # generate points for monte-carlo memory retrieval
         self.points = generate_points_in_sphere(n_points=10_000, radius=30)
-        self.mem_indices = self._compute_mem_indices()
+        self.mem_idx_shifts = self._compute_mem_idx_shifts()
 
-    def _compute_mem_indices(self):
-        l = torch.arange(-self.memory_distance, 0, dtype=torch.float32)
-        lamb = 0.005
-        w = torch.exp(lamb * l)
-        w[-4:] += 1 # force prev. 4 frames
+    def _compute_prev_idx_shifts(self):
+        valid_prev_shifts = torch.arange(-self.prev_distance, 0, dtype=torch.float32)  # (self.prev_distance)
+
+        # compute positive distances from current frame at idx
+        distances = -valid_prev_shifts
+
+        # linearly decaying weights
+        weights = ((self.prev_distance + 1) - distances)
+        weights = weights / weights.sum()
+
+        # sample without replacement according to weights
+        picks = torch.multinomial(weights, self.num_prev_frames, replacement=False)  # (self.num_prev_frames)
+        sampled_shifts = valid_prev_shifts[picks].to(torch.int64)                    # e.g. [-3, -1] (no ordering though)
+        return sampled_shifts
+
+    def _compute_mem_idx_shifts(self):
+        # define candidate index shifts up to memory_distance indices behind previous frame window
+        mem_min_shift = -self.prev_distance
+        mem_max_shift = mem_min_shift - self.memory_distance
+        valid_mem_shifts = torch.arange(mem_max_shift, mem_min_shift, dtype=torch.float32)  # (self.memory_size)
+
+        # compute exponential weights that sum up to 1
+        lamb = 0.005  # <-- dropoff-factor in e^{lamb * l} exponential
+        w = torch.exp(lamb * valid_mem_shifts)
         w = w / w.sum()
 
+        # invert CDF sampling for self.memory_size points
         cdf = torch.cumsum(w, dim=0)
-        u = torch.linspace(1/(2*self.memory_size),
-                        1 - 1/(2*self.memory_size),
-                        self.memory_size)
+        u = torch.linspace(1/(2*self.memory_size), 1 - 1/(2*self.memory_size), self.memory_size)
+        picks = torch.searchsorted(cdf, u)
 
-        # torch.searchsorted finds insertion points i such that cdf[i-1] < u <= cdf[i]
-        idx = torch.searchsorted(cdf, u)
-
-        return l[idx].to(torch.int64)
+        # gather sampled indices and cast to ints
+        sampled_shifts = valid_mem_shifts[picks].to(torch.int64)
+        return sampled_shifts
 
     def _preprocess_demo_metadata(self, demo_id):
         with open(os.path.join(self.dataset_dir, f"{demo_id}.jsonl"), "rt") as f:
@@ -343,6 +363,7 @@ class MinecraftDataset(Dataset):
         return sum([self.demo_to_num_frames[demo_id] for demo_id in self.unique_ids]) - len(self.unique_ids)
 
     def __getitem__(self, idx):
+        # ----- extract relevant data -----
         demo_id, frame_idx = self._idx_to_demo_and_frame(idx)
         assert frame_idx > 0 and frame_idx < self.demo_to_num_frames[demo_id]
 
@@ -352,30 +373,40 @@ class MinecraftDataset(Dataset):
             self.demo_to_metadata[demo_id]["is_gui_open"],
             self.demo_to_metadata[demo_id]["mouse_pos"],
         )
-        action, target_pose = action_matrix[frame_idx-1], pose_matrix[frame_idx]
 
-        # sample K context frames using monte-carlo overlap
-        cur_mem_indices = frame_idx + self.mem_indices
-        cur_mem_indices = cur_mem_indices[cur_mem_indices >= 0]
-        cur_mem_indices = cur_mem_indices[~is_gui_open[cur_mem_indices]] # filter out frames where the GUI is open
-        if len(cur_mem_indices) == 0 or cur_mem_indices[-1] != frame_idx-1:
-            cur_mem_indices = torch.cat([cur_mem_indices, torch.tensor([frame_idx-1])])
-        context_indices = get_most_relevant_poses_to_target(
-            target_pose=target_pose, 
-            other_poses=pose_matrix[cur_mem_indices], 
+        # ----- sample K context frames -----
+        # self.num_prev_frames randomly selected from previous frame window --> forced to be selected in memory process
+        # self.num_mem_frames selected using WorldMem monte-carlo overlap
+        # we have to pass the previous frames through the memory process due to similarity filtering; we penalize memory
+        # frames if they are too close to the FOV of the forced previous frames
+
+        # calculate indices of context frames using backwards shifts from frame_idx
+        mem_frame_idx_shifts = self.mem_idx_shifts               # pre-computed and cached
+        prev_frame_idx_shifts = self._compute_prev_idx_shifts()  # randomly chosen each sample
+        candidate_ctx_indices = frame_idx + torch.cat([prev_frame_idx_shifts, mem_frame_idx_shifts])
+
+        # clean up context frame indices since samples from early in a video may not have many previous frames
+        candidate_ctx_indices = candidate_ctx_indices[candidate_ctx_indices >= 0]           # filter out frame indices that are negative
+        candidate_ctx_indices = candidate_ctx_indices[~is_gui_open[candidate_ctx_indices]]  # filter out frames where the GUI is open
+
+        # retrieve final context frame indices using forced prev frames and overlap based memory frames
+        retrieved_indices = get_most_relevant_poses_to_target(
+            target_pose=pose_matrix[frame_idx],
+            other_poses=pose_matrix[candidate_ctx_indices], 
             points=self.points, 
             min_overlap=0.1, 
             k=self.num_context_frames,
+            num_prev_frames=self.num_prev_frames
         )
-        # convert back to trajectory indices
-        context_indices = cur_mem_indices[context_indices]
+        context_indices = candidate_ctx_indices[retrieved_indices].sort(descending=True)
 
-        # concatenate target frame and context frame indices
+        # concatenate the target frame and context frame indices
         frame_indices = torch.cat([torch.tensor([frame_idx]), context_indices])
 
         # convert poses to plucker
         absolute_camera_to_world_matrices = euler_to_camera_to_world_matrix(pose_matrix[frame_indices])
         plucker = convert_to_plucker(poses=absolute_camera_to_world_matrices, curr_frame=0).squeeze()
+        actions = action_matrix[context_indices]
 
         # read frames from disk
         frames = []
@@ -397,12 +428,13 @@ class MinecraftDataset(Dataset):
 
         frames = torch.stack(frames, axis=0)
         assert len(frames) == self.num_context_frames + 1
+
         timestamps = frame_indices - frame_idx
 
         return {
             "frames": frames,
             "plucker": plucker,
-            "action": action,
+            "action": actions,
             "timestamps": timestamps,
             "num_non_padding_frames": num_non_padding_frames
         }
