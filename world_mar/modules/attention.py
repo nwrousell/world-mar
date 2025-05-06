@@ -38,7 +38,7 @@ class STBlock(nn.Module):
         approx_gelu = lambda: nn.GELU(approximate="tanh") # fast, they say
 
         # --- spatial attention block ---
-        self.s_norm1 = norm_layer(dim, eps=1e-4)
+        self.s_norm1 = norm_layer(dim)
         self.spatial_attn = SpatialAxialAttention(
             dim=dim,
             heads=num_heads,
@@ -46,7 +46,7 @@ class STBlock(nn.Module):
             rotary_emb=spatial_rotary_emb, 
             attn_drop=attn_drop, 
         )
-        self.s_norm2 = norm_layer(dim, eps=1e-4)
+        self.s_norm2 = norm_layer(dim)
         self.s_mlp = mlp_layer(
             in_features=dim,
             hidden_features=int(dim*mlp_ratio),
@@ -56,7 +56,7 @@ class STBlock(nn.Module):
         )
 
         # --- temporal attention block
-        self.t_norm1 = norm_layer(dim, eps=1e-4)
+        self.t_norm1 = norm_layer(dim)
         self.temporal_attn = TemporalAxialAttention(
             dim=dim,
             heads=num_heads,
@@ -64,7 +64,7 @@ class STBlock(nn.Module):
             rotary_emb=temporal_rotary_emb,
             attn_drop=attn_drop, 
         )
-        self.t_norm2 = norm_layer(dim, eps=1e-4)
+        self.t_norm2 = norm_layer(dim)
         self.t_mlp = mlp_layer(
             in_features=dim,
             hidden_features=int(dim*mlp_ratio),

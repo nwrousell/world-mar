@@ -66,7 +66,7 @@ class WorldMAR(pl.LightningModule):
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
         self.mask_random_frame = mask_random_frame
-        self.mask_ratio_gen = stats.truncnorm((mask_ratio_min - 1.0) / 0.25, 0, loc=1.0, scale=0.25)
+        self.mask_ratio_generator = stats.truncnorm((mask_ratio_min - 1.0) / 0.25, 0, loc=1.0, scale=0.25)
         self.prev_masking_rate = prev_masking_rate
 
         # ----- global embeddings -----
@@ -93,7 +93,7 @@ class WorldMAR(pl.LightningModule):
         self.patch_size = patch_size
         self.token_embed_dim = token_embed_dim * patch_size**2
         self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
-        self.z_proj_ln = nn.LayerNorm(st_embed_dim, eps=1e-4)
+        # self.z_proj_ln = nn.LayerNorm(st_embed_dim)
 
         # special token [PRED] for final frame that must be generated
         self.pred_token = nn.Parameter(torch.zeros(1, st_embed_dim))
@@ -107,6 +107,9 @@ class WorldMAR(pl.LightningModule):
                 temporal_rotary_emb=self.enc_temporal_rotary_embedder
             ) for _ in range(encoder_depth)])
 
+        # final normalization
+        self.encoder_norm = nn.LayerNorm(st_embed_dim)
+
         # ----- decoder -----
         # special token [MASK] for selected tokens that decoder should in-paint
         self.mask_token = nn.Parameter(torch.zeros(1, 1, st_embed_dim))
@@ -119,6 +122,9 @@ class WorldMAR(pl.LightningModule):
                 spatial_rotary_emb=self.dec_spatial_rotary_embedder,
                 temporal_rotary_emb=self.dec_temporal_rotary_embedder
             ) for _ in range(decoder_depth)])
+        
+        # final normalization
+        self.decoder_norm = nn.LayerNorm(st_embed_dim)
 
         # ----- pose prediction -----
         # TODO: add pose prediction network, throw into training
@@ -222,34 +228,39 @@ class WorldMAR(pl.LightningModule):
         x = x.reshape(bsz, h_ * p * w_ * p, c)
         return x  # [bsz, (h w), c]
     
-    def sample_orders(self, bsz):
+    def sample_orders(self, batch_size):
+        # contains B randomized vectors of indices going from 0, 1, ..., HW-1
         orders = []
-        for _ in range(bsz):
-            order = np.array(list(range(self.frame_seq_len)))
-            np.random.shuffle(order)
+
+        for _ in range(batch_size):
+            order = np.array(list(range(self.frame_seq_len)))           # (HW)
+            np.random.shuffle(order)                                    # (HW)
             orders.append(order)
-        # orders = torch.Tensor(np.array(orders)).cuda().long()
-        orders = torch.Tensor(np.array(orders)).to(self.device).long()
+
+        orders = torch.Tensor(np.array(orders)).to(self.device).long()  # (B, HW)
         return orders
 
     def random_masking(self, x, orders, random_offset=False, masking_rate=None):
         B = x.shape[0]
 
-        mask_rate = self.mask_ratio_gen.rvs(1)[0] if not masking_rate else masking_rate
+        mask_rate = self.mask_ratio_generator.rvs(1)[0] if not masking_rate else masking_rate
         num_masked_tokens = int(np.ceil(self.frame_seq_len * mask_rate))
-        mask = torch.zeros((B, self.frame_seq_len), dtype=bool, device=x.device)
+        mask = torch.zeros((B, self.frame_seq_len), dtype=bool, device=x.device)  # (B, HW)
 
         if random_offset:
-            offsets = torch.randint(high=self.num_frames, size=B, dtype=torch.int64, device=self.device)
+            # All frames have random masking as regularlization; pick a random frame to actually 
+            # predict over (masks on that particular frame become tokens that are diffused over)
+            offsets = torch.randint(high=self.num_frames, size=B, dtype=torch.int64, device=self.device)  # (B)
         else:
-            offsets = torch.zeros(B, dtype=torch.int64, device=x.device)
+            # Predict the last frame (at index 0)
+            offsets = torch.zeros(B, dtype=torch.int64, device=x.device)                                  # (B)
 
         pred_mask = torch.scatter(
             mask,
             dim=-1, 
             index=orders[:, :num_masked_tokens], 
             src=torch.ones(B, self.frame_seq_len, dtype=bool, device=x.device)
-        )
+        )  # (B, HW)
         
         if self.training and not random_offset:
             prev_mask = torch.scatter(
@@ -261,7 +272,7 @@ class WorldMAR(pl.LightningModule):
         else:
             prev_mask = None
 
-        return pred_mask, prev_mask, offsets # b hw, b
+        return pred_mask, prev_mask, offsets  # (B, HW), (B, HW), (B)
 
     def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False):
         B, T, H, W, D = x.shape
@@ -327,18 +338,21 @@ class WorldMAR(pl.LightningModule):
         # poses:   (B, T, 40H, 40W, 6)
 
         # project and layer normalize
-        x = self.z_proj(x)                                                # (B, T, H, W, D)
-        x = self.z_proj_ln(x)                                             # (B, T, H, W, D)
+        x = self.z_proj(x)                                                  # (B, T, H, W, D)
 
         # add pose and timestamp embeddings
-        x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps)  # (B, T, H, W, D)
+        x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps)    # (B, T, H, W, D)
 
         # add token buffers for prediction, action (on prev frame), and context (on memory frames)
-        x = self.add_pred_and_action_embeddings(x, actions)               # (B, T, H+1, W, D)
+        x = self.add_pred_and_action_embeddings(x, actions)                 # (B, T, H+1, W, D)
+        x = self.z_proj_ln(x)                                               # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         for block in self.encoder_blocks:
-            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)
+            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)  # (B, T, H+1, W, D)
+        
+        # final layer norm before passing to the decoder
+        x = self.encoder_norm(x)                                            # (B, T, H+1, W, D)
 
         return x  # (B, T, H+1, W, D)
 
@@ -365,17 +379,20 @@ class WorldMAR(pl.LightningModule):
         for block in self.decoder_blocks:
             x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)                 # (B, T, H+1, W, D)
 
+        # final layer norm before passing to the diffusion backbone
+        x = self.decoder_norm(x)                                                           # (B, T, H+1, W, D)
+
         # remove the extra token buffer that was concatenated by the encoder onto x's H dim
         x = x[:, :, :H, :, :]                                                              # (B, T, H, W, D)
 
         return x  # (B, T, H, W, D)
     
-    def forward_diffusion(self, z, tgt, mask):
-        tgt = rearrange(tgt, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1)
+    def forward_diffusion(self, z, target, mask):
+        target = rearrange(target, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1)  # (4BHW, D)
         z = z + self.diffusion_pos_emb_learned
-        z = rearrange(z, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1) # ad
-        mask = rearrange(mask, "b s -> (b s)").repeat(self.diffusion_batch_mul)
-        loss = self.diffloss(z=z, target=tgt, mask=mask)
+        z = rearrange(z, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1)            # (4BHW, D)
+        mask = rearrange(mask, "b s -> (b s)").repeat(self.diffusion_batch_mul)                 # (4BHW)
+        loss = self.diffloss(z=z, target=target, mask=mask)
         return loss
 
     def construct_attn_masks(self, x, mask, offsets, prev_mask=None, padding_mask=None):
