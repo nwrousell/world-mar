@@ -248,7 +248,7 @@ class WorldMAR(pl.LightningModule):
         mask = torch.zeros((B, self.frame_seq_len), dtype=bool, device=x.device)  # (B, HW)
 
         if random_offset:
-            # All frames have random masking as regularlization; pick a random frame to actually 
+            # All frames have random masking as regularlization; pick a random frame to actually
             # predict over (masks on that particular frame become tokens that are diffused over)
             offsets = torch.randint(high=self.num_frames, size=B, dtype=torch.int64, device=self.device)  # (B)
         else:
@@ -268,7 +268,7 @@ class WorldMAR(pl.LightningModule):
                 dim=-1, 
                 index=orders[:, :int(num_masked_tokens*self.prev_masking_rate)],
                 src=torch.ones(B, self.frame_seq_len, dtype=bool, device=x.device)
-            )
+            )  # (B, HW)
         else:
             prev_mask = None
 
@@ -396,45 +396,64 @@ class WorldMAR(pl.LightningModule):
         return loss
 
     def construct_attn_masks(self, x, mask, offsets, prev_mask=None, padding_mask=None):
-        b, t, h, w, d = x.shape
-        batch_idx = torch.arange(b, device=self.device)
+        B, T, H, W, D = x.shape
+        batch_idx = torch.arange(B, device=self.device)  # (B)
 
         # --- spatial attn mask ---
-        valid_hw = torch.ones(b, t, (h+1)*w, dtype=torch.bool, device=self.device)
+        valid_hw = torch.ones(B, T, (H+1)*W, dtype=torch.bool, device=self.device)  # (B, T, (H+1)W)
 
         if padding_mask is not None:
-            valid_hw &= padding_mask.unsqueeze(-1)
+            # mask out entire frames if they were added as padding (padding_mask is (B, T),
+            # and padding_mask[:, t] = 0 if the frame at timestep t is padding)
+            valid_hw &= padding_mask.unsqueeze(-1)  # (B, T, (H+1)W)
 
         if prev_mask is not None:
-            offsets_prev = torch.ones_like(offsets, dtype=torch.int64, device=self.device)
-            valid_hw[batch_idx, offsets_prev] = ~prev_mask
+            # set random tokens of the previous frame (time index 1) to be masked (i.e. set to 0)
+            offsets_prev = torch.ones_like(offsets, dtype=torch.int64, device=self.device)  # (B)
+            valid_hw[batch_idx, offsets_prev] = ~prev_mask  # (B, T, (H+1)W)
 
+        # construct the decoder spatial attention mask
+        # --------------------------------------------*
+        # valid_hw.unsqueeze(-1) is (B, T, (H+1)W, 1) |
+        # valid_hw.unsqueeze(-2) is (B, T, 1, (H+1)W) |
+        # --------------------------------------------*
+        # this outer-product logical AND operation broadcasts both into (B, T, (H+1)W, (H+1)W) 
+        # so that s_attn_mak[b, t, i, j] = 1 iff tokens i and j are individually valid within frame t
         s_attn_mask_dec = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
+        # attention mechanism expects (B, num_heads, sequence_len, sequence_len) mask, but all heads have same mask
         s_attn_mask_dec = rearrange(s_attn_mask_dec, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
-        valid_hw[batch_idx, offsets] = ~mask
         
+        # construct the encoder spatial attention mask in a similar fashion
+        # but prevent any masked tokens on the predicted frame from being seen
+        valid_hw[batch_idx, offsets] = ~mask
         s_attn_mask_enc = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
         s_attn_mask_enc = rearrange(s_attn_mask_enc, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
 
         # --- temporal attn mask ---
-        valid_t = torch.ones(b, (h+1)*w, t, dtype=torch.bool, device=self.device)
-        _, l, _ = valid_t.shape
-        batch_idx = batch_idx.unsqueeze(1).expand(-1, l)
-        len_idx   = torch.arange(l, device=valid_t.device).unsqueeze(0).expand(b, -1)
-        depth_idx = offsets.unsqueeze(1).expand(-1, l)
+        valid_t = torch.ones(B, (H+1)*W, T, dtype=torch.bool, device=self.device)      # (B, (H+1)W, T)
+        _, L, _ = valid_t.shape
+        batch_idx = batch_idx.unsqueeze(1).expand(-1, L)                               # (B, L)
+        len_idx   = torch.arange(L, device=valid_t.device).unsqueeze(0).expand(B, -1)  # (B, L)
+        depth_idx = offsets.unsqueeze(1).expand(-1, L)                                 # (B, L)
 
         if padding_mask is not None:
-            valid_t &= padding_mask.unsqueeze(1)
+            # mask out entire frames if they were added as padding (padding_mask is (B, T),
+            # and padding_mask[:, t] = 0 if the frame at timestep t is padding)
+            valid_t &= padding_mask.unsqueeze(1)  # (B, (H+1)W, T)
 
         if prev_mask is not None:
-            prev_depth_idx = offsets_prev.unsqueeze(1).expand(-1, l)
+            # prev_mask is (B, (H+1)W) = (B, L)
+            # zero out every place that has been spatially masked with prev_mask in the selected pred frame timestep
+            prev_depth_idx = offsets_prev.unsqueeze(1).expand(-1, L)  # (B, L)
             valid_t[batch_idx[prev_mask], len_idx[prev_mask], prev_depth_idx[prev_mask]] = False
 
+        # construct the decoder temporal attention mask using the outer-product logical AND
         t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
         t_attn_mask_dec = rearrange(t_attn_mask_dec, "b hw t1 t2 -> (b hw) 1 t1 t2")
 
+        # construct the encoder temporal attention mask in a similar fashion
+        # but prevent any masked tokens on the predicted frame from being seen
         valid_t[batch_idx[mask], len_idx[mask], depth_idx[mask]] = False
-        
         t_attn_mask_enc = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
         t_attn_mask_enc = rearrange(t_attn_mask_enc, "b hw t1 t2 -> (b hw) 1 t1 t2")
 
@@ -452,26 +471,26 @@ class WorldMAR(pl.LightningModule):
         # 2) gen mask
         B, T, H, W, D = x.shape
         orders = self.sample_orders(B)
-        pred_mask, prev_mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate) # b hw, b
-        spatial_mask = rearrange(pred_mask, "b (h w) -> b h w", h=H)
-        spatial_mask = torch.cat([spatial_mask, torch.zeros(B, 1, W, dtype=torch.bool, device=self.device)], dim=-2)
-        spatial_mask = rearrange(spatial_mask, "b h w -> b (h w)")
+        pred_mask, prev_mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate)  # (B, HW), (B, HW), (B)
+        padded_pred_mask = rearrange(pred_mask, "b (h w) -> b h w", h=H)                                                        # (B, H, W)
+        padded_pred_mask = torch.cat([padded_pred_mask, torch.zeros((B, 1, W), dtype=torch.bool, device=self.device)], dim=-2)  # (B, H+1, W)
+        padded_pred_mask = rearrange(padded_pred_mask, "b h w -> b (h w)")                                                      # (B, (H+1)W)
 
         if prev_mask is not None:
-            prev_mask = rearrange(prev_mask, "b (h w) -> b h w", h=H)
-            prev_mask = torch.cat([prev_mask, torch.zeros(B, 1, W, dtype=torch.bool, device=self.device)], dim=-2)
-            prev_mask = rearrange(prev_mask, "b h w -> b (h w)")
+            padded_prev_mask = rearrange(prev_mask, "b (h w) -> b h w", h=H)                                                      # (B, H, W)
+            padded_prev_mask = torch.cat([padded_prev_mask, torch.zeros(B, 1, W, dtype=torch.bool, device=self.device)], dim=-2)  # (B, H+1, W))
+            padded_prev_mask = rearrange(padded_prev_mask, "b h w -> b (h w)")                                                    # (B, (H+1)W)
 
         # 3) construct attn_masks
         (s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(
-            x, spatial_mask, offsets, prev_mask=prev_mask, padding_mask=padding_mask
+            x, padded_pred_mask, offsets, prev_mask=padded_prev_mask, padding_mask=padding_mask
         )
 
         # 4) run encoder
         x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
 
         # 5) run decoder
-        z = self.forward_decoder(x, actions, poses, timestamps, spatial_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        z = self.forward_decoder(x, actions, poses, timestamps, padded_pred_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
         return z, pred_mask, offsets, x_gt

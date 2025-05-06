@@ -6,6 +6,29 @@ model:
       target: world_mar.oasis_utils.vae.ViT_L_20_Shallow_Encoder 
       params:
         load_from_ckpt: checkpoints/oasis/vit-l-20.safetensors
+    img_height=360, 
+    img_width=640, 
+    num_frames=5,
+    patch_size=2, 
+    token_embed_dim=16,
+    vae_seq_h=18, 
+    vae_seq_w=32,
+    st_embed_dim=256,
+    encoder_depth=8, 
+    decoder_depth=8, 
+    encoder_num_heads=8,
+    decoder_num_heads=8,
+    diffloss_w=256, 
+    diffloss_d=3, 
+    num_sampling_steps='100', 
+    diffusion_batch_mul=4,
+    mask_random_frame=False, 
+    prev_masking_rate=0.5,
+    mask_ratio_min=0.7,
+    proj_dropout=0.1,
+    attn_dropout=0.1,
+    gradient_clip_val=1.0,
+    warmup_steps=13500,
 
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
