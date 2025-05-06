@@ -104,6 +104,7 @@ class WorldMAR(pl.LightningModule):
         self.dec_temporal_rotary_embedder = RotaryEmbedding(dim=st_embed_dim // decoder_num_heads)
 
         # ----- encoder -----
+        self.scale_factor = 0.07843137255
         # initial projection
         self.patch_size = patch_size
         self.token_embed_dim = token_embed_dim * patch_size**2
@@ -452,6 +453,9 @@ class WorldMAR(pl.LightningModule):
     def forward(self, x, actions, poses, timestamps, padding_mask=None):        
         z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask)
 
+        # scale the input tensor x to match a standard normal distribution
+        x = x * self.scale_factor
+
         b, _, h, w, _ = z.shape
 
         # split into tgt frame + diffuse
@@ -551,6 +555,9 @@ class WorldMAR(pl.LightningModule):
         # poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
         # timestamps = batch["timestamps"].to(self.device) # shape [B, T]
 
+        # scale the input tensor x to match a standard normal distribution
+        x = x * self.scale_factor
+
         # --- construct padding_mask ---
         B, L = len(x), self.num_frames * self.frame_seq_len
         # assert not torch.any(batch_nframes > self.num_frames)
@@ -569,6 +576,10 @@ class WorldMAR(pl.LightningModule):
         z_t = self.final_proj(rearrange(z_t, "b h w d -> (b h w) d"))
         patch_preds = rearrange(z_t, "(b h w) d -> b (h w) d", b=b, h=h, w=w)
         x_pred = self.unpatchify(patch_preds)
+
+        # undo the scaling operation done to the input tensor (recover the original range of values)
+        x_pred = x_pred / self.scale_factor
+
         return x_pred
 
         # diffuse

@@ -22,7 +22,7 @@ from world_mar.dataset.dataloader import MinecraftDataModule
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=1000):
+    def __init__(self, log_every_n_steps=500):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -30,7 +30,7 @@ class ImageLogger(pl.Callback):
         global_step = trainer.global_step
 
         if global_step % self.log_every_n_steps == 0:
-            num_to_sample = 4
+            num_to_sample = 8
             latents = batch["frames"].to(pl_module.device)[:num_to_sample]
             batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:num_to_sample]
             actions = batch["action"].to(pl_module.device)[:num_to_sample]
@@ -41,13 +41,13 @@ class ImageLogger(pl.Callback):
             sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
 
             # decode to frames
-            to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+            to_decode = torch.cat([latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
             pl_module.vae.to("cuda")
             with torch.autocast(device_type="cuda", enabled=False):
-                one, two, three, four, five = (((pl_module.vae.decode(to_decode) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=5, dim=0) # each are n c h w
+                one, two, three, four = (((pl_module.vae.decode(to_decode).clip(-1, 1) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=4, dim=0) # each are n c h w
             pl_module.vae.to("cpu")
 
-            trifolds = torch.cat([one, two, three, four, five], dim=-1) # concat along width dim
+            trifolds = torch.cat([one, two, three, four], dim=-1) # concat along width dim
 
             wandb_images = [wandb.Image(img) for img in trifolds]
 
