@@ -403,10 +403,9 @@ class MinecraftDataset(Dataset):
         # concatenate the target frame and context frame indices
         frame_indices = torch.cat([torch.tensor([frame_idx]), context_indices])
 
-        # convert poses to plucker
+        # convert poses to plucker embeddings
         absolute_camera_to_world_matrices = euler_to_camera_to_world_matrix(pose_matrix[frame_indices])
         plucker = convert_to_plucker(poses=absolute_camera_to_world_matrices, curr_frame=0).squeeze()
-        actions = action_matrix[context_indices]
 
         # read frames from disk
         frames = []
@@ -428,7 +427,7 @@ class MinecraftDataset(Dataset):
 
         frames = torch.stack(frames, axis=0)
         assert len(frames) == self.num_context_frames + 1
-
+        actions = action_matrix[context_indices]
         timestamps = frame_indices - frame_idx
 
         return {
