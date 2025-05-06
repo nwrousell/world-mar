@@ -12,7 +12,7 @@ from torchvision.io import read_image
 from einops import rearrange
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -64,7 +64,8 @@ def get_callbacks(logdir):
             monitor="val_loss",
             mode="min"
         ),
-        ImageLogger()
+        ImageLogger(),
+        LearningRateMonitor(logging_interval='step')
     ]
 
 def find_latest_checkpoint(logdir):

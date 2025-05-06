@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LinearLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from einops import rearrange
 from world_mar.modules.attention import STBlock
 from world_mar.modules.embeddings.timestep_embedding import TimestepEmbedder
@@ -24,15 +24,6 @@ from time import time
 
 seed = 42
 torch.manual_seed(seed)
-
-def mask_by_order(mask_len, order, bsz, seq_len):
-    """
-    Returns a boolean mask where the *first* `mask_len` indices of `order`
-    are marked True. All others are False.
-    """
-    masking = torch.zeros(bsz, seq_len)
-    masking.scatter_(1, order[:, :mask_len.item()], True)  # in-place set
-    return masking
 
 class WorldMAR(pl.LightningModule):
     """
@@ -54,12 +45,12 @@ class WorldMAR(pl.LightningModule):
         encoder_depth=8, encoder_num_heads=8,
         decoder_depth=8, decoder_num_heads=8,
         diffloss_w=256, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
-        mask_random_frame=False,
+        mask_random_frame=False, prev_masking_rate=0.5,
         mask_ratio_min=0.7,
         proj_dropout=0.1,
         attn_dropout=0.1,
         gradient_clip_val=1.0,
-        warmup_steps=10000, # TODO: change this depending on dataset size
+        warmup_steps=13500,  # TODO: change this depending on dataset size
         **kwargs
     ):
         super().__init__()
@@ -76,6 +67,7 @@ class WorldMAR(pl.LightningModule):
         # ref: masking ratio used by MAR for image gen
         self.mask_random_frame = mask_random_frame
         self.mask_ratio_gen = stats.truncnorm((mask_ratio_min - 1.0) / 0.25, 0, loc=1.0, scale=0.25)
+        self.prev_masking_rate = prev_masking_rate
 
         # ----- global embeddings -----
         self.pose_embedder = nn.Sequential(
@@ -241,20 +233,35 @@ class WorldMAR(pl.LightningModule):
         return orders
 
     def random_masking(self, x, orders, random_offset=False, masking_rate=None):
-        bsz= x.shape[0]
+        B = x.shape[0]
+
         mask_rate = self.mask_ratio_gen.rvs(1)[0] if not masking_rate else masking_rate
         num_masked_tokens = int(np.ceil(self.frame_seq_len * mask_rate))
-        mask = torch.zeros(bsz, self.frame_seq_len, dtype=bool, device=x.device)
-        # TODO: consider moving this offset to any frame?
-        #       this is 0 currently because pred frame is at start of seq
+        mask = torch.zeros((B, self.frame_seq_len), dtype=bool, device=x.device)
+
         if random_offset:
-            # TODO: THIS IS WRONG, HIGH SHOULD BE BATCH ITEM NUM FRAME DEPENDENT
-            offsets = torch.randint(high=self.num_frames, size=bsz, dtype=torch.int64, device=self.device)
+            offsets = torch.randint(high=self.num_frames, size=B, dtype=torch.int64, device=self.device)
         else:
-            offsets = torch.zeros(bsz, dtype=torch.int64, device=x.device)
-        mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
-                             src=torch.ones(bsz, self.frame_seq_len, dtype=bool, device=x.device))
-        return mask, offsets # b hw, b
+            offsets = torch.zeros(B, dtype=torch.int64, device=x.device)
+
+        pred_mask = torch.scatter(
+            mask,
+            dim=-1, 
+            index=orders[:, :num_masked_tokens], 
+            src=torch.ones(B, self.frame_seq_len, dtype=bool, device=x.device)
+        )
+        
+        if self.training and not random_offset:
+            prev_mask = torch.scatter(
+                mask, 
+                dim=-1, 
+                index=orders[:, :int(num_masked_tokens*self.prev_masking_rate)],
+                src=torch.ones(B, self.frame_seq_len, dtype=bool, device=x.device)
+            )
+        else:
+            prev_mask = None
+
+        return pred_mask, prev_mask, offsets # b hw, b
 
     def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False):
         B, T, H, W, D = x.shape
@@ -327,7 +334,7 @@ class WorldMAR(pl.LightningModule):
         x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps)  # (B, T, H, W, D)
 
         # add token buffers for prediction, action (on prev frame), and context (on memory frames)
-        x = self.add_pred_and_action_embeddings(x, actions)           # (B, T, H+1, W, D)
+        x = self.add_pred_and_action_embeddings(x, actions)               # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         for block in self.encoder_blocks:
@@ -352,7 +359,7 @@ class WorldMAR(pl.LightningModule):
         x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps, is_decoder=True)  # (B, T, H+1, W, D)
 
         # re-add [PRED], [ACTION], and [CTX] tokens to the token buffers
-        x = self.add_pred_and_action_embeddings(x, actions, is_decoder=True)           # (B, T, H+1, W, D)
+        x = self.add_pred_and_action_embeddings(x, actions, is_decoder=True)               # (B, T, H+1, W, D)
 
         # pass through each decoder spatio-temporal attention block
         for block in self.decoder_blocks:
@@ -371,14 +378,20 @@ class WorldMAR(pl.LightningModule):
         loss = self.diffloss(z=z, target=tgt, mask=mask)
         return loss
 
-    def construct_attn_masks(self, x, mask, offsets, padding_mask=None):
+    def construct_attn_masks(self, x, mask, offsets, prev_mask=None, padding_mask=None):
         b, t, h, w, d = x.shape
         batch_idx = torch.arange(b, device=self.device)
 
         # --- spatial attn mask ---
         valid_hw = torch.ones(b, t, (h+1)*w, dtype=torch.bool, device=self.device)
+
         if padding_mask is not None:
             valid_hw &= padding_mask.unsqueeze(-1)
+
+        if prev_mask is not None:
+            offsets_prev = torch.ones_like(offsets, dtype=torch.int64, device=self.device)
+            valid_hw[batch_idx, offsets_prev] = ~prev_mask
+
         s_attn_mask_dec = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
         s_attn_mask_dec = rearrange(s_attn_mask_dec, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
         valid_hw[batch_idx, offsets] = ~mask
@@ -388,16 +401,21 @@ class WorldMAR(pl.LightningModule):
 
         # --- temporal attn mask ---
         valid_t = torch.ones(b, (h+1)*w, t, dtype=torch.bool, device=self.device)
-        if padding_mask is not None:
-            valid_t &= padding_mask.unsqueeze(1)
-        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
-        t_attn_mask_dec = rearrange(t_attn_mask_dec, "b hw t1 t2 -> (b hw) 1 t1 t2")
-
         _, l, _ = valid_t.shape
-
         batch_idx = batch_idx.unsqueeze(1).expand(-1, l)
         len_idx   = torch.arange(l, device=valid_t.device).unsqueeze(0).expand(b, -1)
         depth_idx = offsets.unsqueeze(1).expand(-1, l)
+
+        if padding_mask is not None:
+            valid_t &= padding_mask.unsqueeze(1)
+
+        if prev_mask is not None:
+            prev_depth_idx = offsets_prev.unsqueeze(1).expand(-1, l)
+            valid_t[batch_idx[prev_mask], len_idx[prev_mask], prev_depth_idx[prev_mask]] = False
+
+        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
+        t_attn_mask_dec = rearrange(t_attn_mask_dec, "b hw t1 t2 -> (b hw) 1 t1 t2")
+
         valid_t[batch_idx[mask], len_idx[mask], depth_idx[mask]] = False
         
         t_attn_mask_enc = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
@@ -406,25 +424,31 @@ class WorldMAR(pl.LightningModule):
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
     def masked_encoder_decoder(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
-        b = x.shape[0]
+        B = x.shape[0]
 
         # 1) patchify latents
         x = rearrange(x, "b t s c -> (b t) s c")
         x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
-        x = rearrange(x, "(b t) h w d -> b t h w d", b=b)
+        x = rearrange(x, "(b t) h w d -> b t h w d", b=B)
         x_gt = x.clone().detach()
 
         # 2) gen mask
-        b, t, h, w, d = x.shape
-        orders = self.sample_orders(b)
-        mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame) # b hw, b
-        spatial_mask = rearrange(mask, "b (h w) -> b h w", h=h)
-        spatial_mask = torch.cat([spatial_mask, torch.zeros(b,1,w, dtype=torch.bool, device=self.device)], dim=-2)
+        B, T, H, W, D = x.shape
+        orders = self.sample_orders(B)
+        pred_mask, prev_mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate) # b hw, b
+        spatial_mask = rearrange(pred_mask, "b (h w) -> b h w", h=H)
+        spatial_mask = torch.cat([spatial_mask, torch.zeros(B, 1, W, dtype=torch.bool, device=self.device)], dim=-2)
         spatial_mask = rearrange(spatial_mask, "b h w -> b (h w)")
 
+        if prev_mask is not None:
+            prev_mask = rearrange(prev_mask, "b (h w) -> b h w", h=H)
+            prev_mask = torch.cat([prev_mask, torch.zeros(B, 1, W, dtype=torch.bool, device=self.device)], dim=-2)
+            prev_mask = rearrange(prev_mask, "b h w -> b (h w)")
+
         # 3) construct attn_masks
-        (s_attn_mask_enc, t_attn_mask_enc, 
-         s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(x, spatial_mask, offsets, padding_mask=padding_mask)
+        (s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(
+            x, spatial_mask, offsets, prev_mask=prev_mask, padding_mask=padding_mask
+        )
 
         # 4) run encoder
         x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
@@ -433,7 +457,7 @@ class WorldMAR(pl.LightningModule):
         z = self.forward_decoder(x, actions, poses, timestamps, spatial_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
-        return z, mask, offsets, x_gt
+        return z, pred_mask, offsets, x_gt
 
     def forward(self, x, actions, poses, timestamps, padding_mask=None):
         b = x.shape[0]
@@ -503,12 +527,27 @@ class WorldMAR(pl.LightningModule):
 
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
-        lr_sched = LinearLR(optim, start_factor=1.0/5, end_factor=1.0, total_iters=self.warmup_steps)
+        warmup_sched = LinearLR(
+            optim,
+            start_factor=2e-1,   # or 0.0
+            end_factor=1.0,
+            total_iters=self.warmup_steps
+        )
+        cosine_sched = CosineAnnealingLR(
+            optim,
+            T_max=self.warmup_steps * 50 - self.warmup_steps,
+            eta_min=0.0
+        )
+        scheduler = SequentialLR(
+            optim,
+            schedulers=[warmup_sched, cosine_sched],
+            milestones=[self.warmup_steps]
+        )
 
         return {
             "optimizer": optim,
             "lr_scheduler": {
-                "scheduler": lr_sched,
+                "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
             }
