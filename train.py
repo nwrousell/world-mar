@@ -41,7 +41,6 @@ class ImageLogger(pl.Callback):
             sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
 
             # decode to frames
-            # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
             to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
             pl_module.vae.to("cuda")
             with torch.autocast(device_type="cuda", enabled=False):

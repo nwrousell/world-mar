@@ -9,6 +9,7 @@ from tqdm import tqdm
 import scipy.stats as stats
 import math
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
@@ -47,7 +48,7 @@ class WorldMAR(pl.LightningModule):
     def __init__(
         self, 
         vae_config=None, # should be an AutoencoderKL 
-        img_height=360, img_width=640, num_frames=5,
+        img_height=360, img_width=640, num_frames=4,
         patch_size=2, token_embed_dim=16,
         vae_seq_h=18, vae_seq_w=32,
         st_embed_dim=256,
@@ -88,6 +89,12 @@ class WorldMAR(pl.LightningModule):
             nn.Linear(action_dim, embedding_hidden_dim),
             nn.ReLU(),
             nn.Linear(embedding_hidden_dim, st_embed_dim)
+        )
+
+        self.final_proj = nn.Sequential(
+            nn.Linear(st_embed_dim, embedding_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_hidden_dim, token_embed_dim * patch_size**2)
         )
 
         # ----- local RoPE embeddings -----
@@ -139,14 +146,14 @@ class WorldMAR(pl.LightningModule):
         # ----- initialize diff loss -----
         # TODO: make cutomizable as MLP (per patch?) vs DiT (per frame).
         #       for now, assuming more lightweight MLP
-        self.diffloss = DiffLoss(
-            target_channels=self.token_embed_dim,
-            z_channels=st_embed_dim,
-            width=diffloss_w,
-            depth=diffloss_d,
-            num_sampling_steps=num_sampling_steps
-        )
-        self.diffusion_batch_mul = diffusion_batch_mul
+        # self.diffloss = DiffLoss(
+        #     target_channels=self.token_embed_dim,
+        #     z_channels=st_embed_dim,
+        #     width=diffloss_w,
+        #     depth=diffloss_d,
+        #     num_sampling_steps=num_sampling_steps
+        # )
+        # self.diffusion_batch_mul = diffusion_batch_mul
 
         # ----- intialize the vae -----
         if vae_config:
@@ -162,8 +169,8 @@ class WorldMAR(pl.LightningModule):
         self.seq_h, self.seq_w = self.vae_seq_h // patch_size, self.vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
         # we assume here the diffusion model operates one frame at a time:
-        self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.seq_h, self.seq_w, st_embed_dim))
-        torch.nn.init.kaiming_normal_(self.diffusion_pos_emb_learned)
+        # self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.seq_h, self.seq_w, st_embed_dim))
+        # torch.nn.init.kaiming_normal_(self.diffusion_pos_emb_learned)
         self.num_frames = num_frames
     
     @staticmethod
@@ -225,6 +232,7 @@ class WorldMAR(pl.LightningModule):
         c = self.vae_embed_dim
         h_, w_ = self.seq_h, self.seq_w
 
+        # 4 144 256 ->  4 9 16 16 2 2
         x = x.reshape(bsz, h_, w_, c, p, p)
         # x = torch.einsum('nhwcpq->nchpwq', x) # (n, h, w, c, p, q)  →  (n, c, h, p, w, q)
         x = rearrange(x, "n h w c p q -> n h p w q c")
@@ -369,13 +377,13 @@ class WorldMAR(pl.LightningModule):
 
         return x  # (B, T, H, W, D)
     
-    def forward_diffusion(self, z, tgt, mask):
-        tgt = rearrange(tgt, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1)
-        z = z + self.diffusion_pos_emb_learned
-        z = rearrange(z, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1) # ad
-        mask = rearrange(mask, "b s -> (b s)").repeat(self.diffusion_batch_mul)
-        loss = self.diffloss(z=z, target=tgt, mask=mask)
-        return loss
+    # def forward_diffusion(self, z, tgt, mask):
+    #     tgt = rearrange(tgt, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1)
+    #     z = z + self.diffusion_pos_emb_learned
+    #     z = rearrange(z, "b h w d -> (b h w) d").repeat(self.diffusion_batch_mul, 1) # ad
+    #     mask = rearrange(mask, "b s -> (b s)").repeat(self.diffusion_batch_mul)
+    #     loss = self.diffloss(z=z, target=tgt, mask=mask)
+    #     return loss
 
     def construct_attn_masks(self, x, mask, offsets, padding_mask=None):
         b, t, h, w, d = x.shape
@@ -441,17 +449,23 @@ class WorldMAR(pl.LightningModule):
 
         return z, mask, offsets, x_gt
 
-    def forward(self, x, actions, poses, timestamps, padding_mask=None):
-        b = x.shape[0]
-        
+    def forward(self, x, actions, poses, timestamps, padding_mask=None):        
         z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask)
+
+        b, _, h, w, _ = z.shape
 
         # split into tgt frame + diffuse
         batch_idx = torch.arange(b, device=self.device)
         z_t = z[batch_idx, offsets] # b h w d
         xt_gt = x_gt[batch_idx, offsets] # b h w d
 
-        loss = self.forward_diffusion(z_t, xt_gt, mask)        
+        z_t = self.final_proj(rearrange(z_t, "b h w d -> (b h w) d"))
+        z_t = rearrange(z_t, "(b h w) d -> b h w d", b=b, h=h, w=w)
+
+        # MSE b/n z_t and xt_gt
+        loss = F.mse_loss(z_t, xt_gt)
+
+        # loss = self.forward_diffusion(z_t, xt_gt, mask)        
 
         return loss
 
@@ -545,24 +559,31 @@ class WorldMAR(pl.LightningModule):
 
         z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask)
 
+        b, _, h, w, _ = z.shape
+
         # grab tokens for [MASK] frame
         batch_idx = torch.arange(B, device=self.device)
-        z_mask = z[batch_idx, offsets] # b h w d
+        z_t = z[batch_idx, offsets] # b h w d
         # xt_gt = x_gt[batch_idx, offsets] # b h w d
 
-        # diffuse
-        z_mask = z_mask + self.diffusion_pos_emb_learned
-        z_mask = rearrange(z_mask, "b h w d -> (b h w) d")
-        
-        # bc we're predicting on all masked at once, this is pretty simple
-        start = time()
-        patch_preds = self.diffloss.sample_ddim(z_mask, cfg=1.0) # (b h w) d
-        end = time()
-        patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
-        # print("out:", patch_preds.shape, end - start)
+        z_t = self.final_proj(rearrange(z_t, "b h w d -> (b h w) d"))
+        patch_preds = rearrange(z_t, "(b h w) d -> b (h w) d", b=b, h=h, w=w)
         x_pred = self.unpatchify(patch_preds)
-
         return x_pred
+
+        # diffuse
+        # z_mask = z_mask + self.diffusion_pos_emb_learned
+        # z_mask = rearrange(z_mask, "b h w d -> (b h w) d")
+        
+        # # bc we're predicting on all masked at once, this is pretty simple
+        # start = time()
+        # patch_preds = self.diffloss.sample_ddim(z_mask, cfg=1.0) # (b h w) d
+        # end = time()
+        # patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
+        # # print("out:", patch_preds.shape, end - start)
+        # x_pred = self.unpatchify(patch_preds)
+
+        # return x_pred
 
     # def sample_tokens(self, bsz, num_iter=64, labels=None, temperature=1.0, progress=False):
 

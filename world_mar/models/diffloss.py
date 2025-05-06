@@ -24,7 +24,7 @@ class DiffLoss(nn.Module):
         )
 
         self.train_diffusion = create_diffusion(timestep_respacing="", noise_schedule="cosine")
-        self.gen_diffusion = create_diffusion(timestep_respacing=num_sampling_steps, diffusion_steps=int(num_sampling_steps), noise_schedule="cosine")
+        self.gen_diffusion = create_diffusion(timestep_respacing=num_sampling_steps, noise_schedule="cosine")
     
     def forward(self, target, z, mask=None):
         t = torch.randint(0, self.train_diffusion.num_timesteps, (target.shape[0],), device=target.device)
@@ -61,7 +61,8 @@ class DiffLoss(nn.Module):
             model_kwargs = dict(c=z, cfg_scale=cfg)
             sample_fn = self.net.forward_with_cfg
         else:
-            noise = torch.randn(z.shape[0], self.in_channels).cuda()
+            # noise = torch.randn(z.shape[0], self.in_channels).cuda()
+            noise = torch.randn(z.shape[0], self.in_channels, dtype=z.dtype).to(z.device)
             model_kwargs = dict(c=z)
             sample_fn = self.net.forward
         
@@ -73,7 +74,7 @@ class DiffLoss(nn.Module):
             model_kwargs=model_kwargs, 
             progress=False,
             # temperature=temperature, 
-            eta=0.0 # true DDIM
+            eta=0.0, # true DDIM
         )
         return sampled_token_latent
 

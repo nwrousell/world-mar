@@ -19,4 +19,4 @@ source env/bin/activate
 export HOME=/users/nrousell 
 
 unset SLURM_NTASKS
-python train.py -n $1 -c configs/world_mar.yaml -d /users/nrousell/scratch/minecraft-raw
+python train.py -n $1 -c configs/world_mar.yaml

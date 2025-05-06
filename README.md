@@ -23,3 +23,9 @@
 - VPT dataset collected by OpenAI contractors
 - download script from [MineRL challenge](https://github.com/minerllabs/basalt-2022-behavioural-cloning-baseline)
 
+
+
+## Optimizations
+- precompute metadata matrices, save to disk, and then read those lazily instead of loading all into memory --> allows higher num_workers
+- profile dataloader parts
+- spatial filtering for dataloader
