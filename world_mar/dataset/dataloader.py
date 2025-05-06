@@ -218,7 +218,12 @@ def composite_images_with_alpha(image1, image2, alpha, x, y):
     image1[y:y + ch, x:x + cw, :] = (image1[y:y + ch, x:x + cw, :] * (1 - alpha) + image2[:ch, :cw, :] * alpha)
 
 class MinecraftDataset(Dataset):
-    def __init__(self, dataset_dir, memory_distance=1000, prev_distance=5, memory_size=100, num_mem_frames=2, num_prev_frames=2):
+    def __init__(
+        self, dataset_dir,
+        memory_size=100,
+        memory_distance=1000, prev_distance=5,
+        num_mem_frames=2, num_prev_frames=2
+    ):
         self.dataset_dir = dataset_dir
         # Window lengths defining how many frames are reserved for previous frame retrieval,
         # and how many are reserved for memory frame retrieval
@@ -439,12 +444,23 @@ class MinecraftDataset(Dataset):
         }
 
 class MinecraftDataModule(L.LightningDataModule):
-    def __init__(self, dataset_dir: str, batch_sz=64, memory_distance=1000, memory_size=100, num_context_frames=4, train_split=0.9, num_workers=8):
+    def __init__(
+        self, dataset_dir: str, batch_sz=64, 
+        memory_size=100,
+        memory_distance=1000, prev_distance=5,
+        num_mem_frames=2, num_prev_frames=2,
+        train_split=0.9, num_workers=8
+    ):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.batch_sz = batch_sz
         self.num_workers = num_workers
-        dataset = MinecraftDataset(dataset_dir=dataset_dir, memory_distance=memory_distance, memory_size=memory_size, num_context_frames=num_context_frames)
+        dataset = MinecraftDataset(
+            dataset_dir=dataset_dir,
+            memory_size=memory_size
+            memory_distance=memory_distance, prev_distance=prev_distance,
+            num_mem_frames=num_mem_frames, num_prev_frames=num_prev_frames
+        )
         self.train_dataset, self.val_dataset = torch.utils.data.random_split(dataset, [train_split, 1-train_split])
     
     def train_dataloader(self):
