@@ -66,7 +66,7 @@ class WorldMAR(pl.LightningModule):
         self.automatic_optimization = False
         plucker_dim = 6
         action_dim = 25
-        embedding_hidden_dim = 128
+        embedding_hidden_dim = 256
         self.warmup_steps = warmup_steps
         self.gradient_clip_val = gradient_clip_val
         self.seq_h, self.seq_w = vae_seq_h // patch_size, vae_seq_w // patch_size
@@ -102,9 +102,10 @@ class WorldMAR(pl.LightningModule):
         self.token_embed_dim = token_embed_dim * patch_size**2
         self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
         self.z_proj_ln = nn.LayerNorm(st_embed_dim, eps=1e-4)
-        # special tokens [PRED] and [CTX]
+
+        # special token [PRED] for final frame that must be generated
         self.pred_token = nn.Parameter(torch.zeros(1, st_embed_dim))
-        self.ctx_token = nn.Parameter(torch.zeros(1, st_embed_dim))
+
         # encoder spatio-temporal attention blocks
         self.encoder_blocks = nn.ModuleList([
             STBlock(
@@ -117,6 +118,7 @@ class WorldMAR(pl.LightningModule):
         # ----- decoder -----
         # special token [MASK] for selected tokens that decoder should in-paint
         self.mask_token = nn.Parameter(torch.zeros(1, 1, st_embed_dim))
+
         # decoder spatio-temporal attention blocks
         self.decoder_blocks = nn.ModuleList([
             STBlock(
@@ -158,6 +160,7 @@ class WorldMAR(pl.LightningModule):
 
         self.seq_h, self.seq_w = self.vae_seq_h // patch_size, self.vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
+
         # we assume here the diffusion model operates one frame at a time:
         self.diffusion_pos_emb_learned = nn.Parameter(torch.zeros(1, self.seq_h, self.seq_w, st_embed_dim))
         torch.nn.init.kaiming_normal_(self.diffusion_pos_emb_learned)
@@ -180,7 +183,6 @@ class WorldMAR(pl.LightningModule):
 
     def initialize_weights(self):
         torch.nn.init.kaiming_normal_(self.pred_token)
-        torch.nn.init.kaiming_normal_(self.ctx_token)
         torch.nn.init.kaiming_normal_(self.mask_token)
         self.apply(self._init_weights)
 
@@ -261,10 +263,12 @@ class WorldMAR(pl.LightningModule):
             H -= 1  # encoder would have concatenated buffer onto x's H dim
             
         assert timestamps.shape == (B, T)
+        assert poses.shape[:2] == (B, T) and poses.shape[-1] == 6
 
         # construct pose embeddings matching latent shape
         poses = poses[:, :, ::36, ::40, :]           # (B, T, H, W, 6)
         pose_embeddings = self.pose_embedder(poses)  # (B, T, H, W, D)
+        assert pose_embeddings.shape == (B, T, H, W, D)
 
         # construct timestamp embeddings matching latent shape
         timestamps = rearrange(timestamps, "b t -> (b t)")                               # (BT)
@@ -272,47 +276,45 @@ class WorldMAR(pl.LightningModule):
         timestamp_embeddings = rearrange(timestamp_embeddings, "(b t) d -> b t d", b=B)  # (B, T, D)
         timestamp_embeddings = timestamp_embeddings.unsqueeze(2).unsqueeze(3)            # (B, T, 1, 1, D)
         timestamp_embeddings = timestamp_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
+        assert timestamp_embeddings.shape == (B, T, H, W, D)
 
         # return the latent with the embeddings added
         x[:, :, :H, :, :] = x[:, :, :H, :, :] + pose_embeddings + timestamp_embeddings   # (B, T, H or H+1, W, D)
         return x
 
-    def add_pred_action_and_ctx_embeddings(self, x, actions, is_decoder=False):
+    def add_pred_and_action_embeddings(self, x, actions, is_decoder=False):
         B, T, H, W, D = x.shape
 
         if is_decoder:
             H -= 1  # encoder would have concatenated buffer onto x's H dim
 
-        assert actions.shape == (B, 25)
+        assert actions.shape == (B, T-1, 25)
 
         # calculate action tokens
-        action_embeddings = self.action_embedder(actions)  # (B, D)
+        action_embeddings = self.action_embedder(actions)                                    # (B, T-1, D)
 
-        # tokens: expected to be d-dimensional vectors
-        pred_token_buffer = self.pred_token.view(1, 1, 1, 1, D).repeat(B, 1, 1, W, 1)      # (B, 1, 1, W, D)
-        action_token_buffer = action_embeddings.view(B, 1, 1, 1, D).repeat(1, 1, 1, W, 1)  # (B, 1, 1, W, D)
-        ctx_token_buffer = self.ctx_token.view(1, 1, 1, 1, D).repeat(B, T-2, 1, W, 1)      # (B, T-2, 1, W, D)
+        # construct [PRED] and [ACTION] token buffers (expected to be a slice varying along time-dimension)
+        pred_token_buffer = self.pred_token.view(1, 1, 1, 1, D).repeat(B, 1, 1, W, 1)        # (B, 1, 1, W, D)
+        action_token_buffer = action_embeddings.view(B, T-1, 1, 1, D).repeat(1, 1, 1, W, 1)  # (B, T-1, 1, W, D)
 
         if not is_decoder:
             # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim) 
-            # concat [ACTION] token buffer to x[:, 1] (second elements along temporal dim)
-            # concat [CTX] token buffer to x[:, 2:] (third, fourth, fifth, ... elements along temporal dim)
+            # concat [ACTION] token buffer to x[:, 1:] (second, third, fourth, ... elements along temporal dim)
             # these concatenations are happening along H, the height dimension (could've been W equivalently)
             x = torch.cat([
                 torch.cat([x[:, 0:1], pred_token_buffer], dim=-3),
-                torch.cat([x[:, 1:2], action_token_buffer], dim=-3),
-                torch.cat([x[:, 2:], ctx_token_buffer], dim=-3)
+                torch.cat([x[:, 1:], action_token_buffer], dim=-3)  # (B, T, H+1, W, D)
             ], dim=-4)  # dim=-3 is H and dim=-4 is T
         else:
             # add [PRED] tokens to x[:, 0, H:, :, :] (extra buffer for first elements along temporal dim) 
-            # add [ACTION] tokens to x[:, 1, H:, :, :] (extra buffer for second elements along temporal dim)
-            # add [CTX] tokens to x[:, 2:, H:, :, :] (extra buffer for third, fourth, fifth, ... elements along temporal dim)
-            tokens = torch.cat([pred_token_buffer, action_token_buffer, ctx_token_buffer], dim=-4)  # (B, T, 1, W, D)
-            x[:, :, H:, :, :] = x[:, :, H:, :, :] + tokens                                          # (B, T, H+1, W, D)
+            # add [ACTION] tokens to x[:, 1:, H:, :, :] (extra buffer for second, third, fourth, ... elements along temporal dim)
+            tokens = torch.cat([pred_token_buffer, action_token_buffer], dim=-4)  # (B, T, 1, W, D)
+            x[:, :, H:, :, :] = x[:, :, H:, :, :] + tokens                        # (B, T, H+1, W, D)
 
+        assert x.shape == (B, T, H+1, W, D)
         return x  # (B, T, H+1, W, D)
 
-    def forward_encoder(self, x, actions, poses, timestamps, s_attn_mask=None, t_attn_mask=None):
+    def forward_encoder(self, x, num_ctx_frames, actions, poses, timestamps, s_attn_mask=None, t_attn_mask=None):
         # x:       (B, T, H, W, token_embed_dim)
         # actions: (B, 25)
         # poses:   (B, T, 40H, 40W, 6)
@@ -325,7 +327,7 @@ class WorldMAR(pl.LightningModule):
         x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps)  # (B, T, H, W, D)
 
         # add token buffers for prediction, action (on prev frame), and context (on memory frames)
-        x = self.add_pred_action_and_ctx_embeddings(x, actions)           # (B, T, H+1, W, D)
+        x = self.add_pred_and_action_embeddings(x, actions)           # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         for block in self.encoder_blocks:
@@ -350,7 +352,7 @@ class WorldMAR(pl.LightningModule):
         x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps, is_decoder=True)  # (B, T, H+1, W, D)
 
         # re-add [PRED], [ACTION], and [CTX] tokens to the token buffers
-        x = self.add_pred_action_and_ctx_embeddings(x, actions, is_decoder=True)           # (B, T, H+1, W, D)
+        x = self.add_pred_and_action_embeddings(x, actions, is_decoder=True)           # (B, T, H+1, W, D)
 
         # pass through each decoder spatio-temporal attention block
         for block in self.decoder_blocks:
