@@ -445,7 +445,7 @@ class MinecraftDataset(Dataset):
 
 class MinecraftDataModule(L.LightningDataModule):
     def __init__(
-        self, dataset_dir: str, batch_sz=64, 
+        self, dataset_dir: str, batch_sz=64,
         memory_size=100,
         memory_distance=1000, prev_distance=5,
         num_mem_frames=2, num_prev_frames=2,

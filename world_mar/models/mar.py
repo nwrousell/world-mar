@@ -39,6 +39,7 @@ class WorldMAR(pl.LightningModule):
         self, 
         vae_config=None, # should be an AutoencoderKL 
         img_height=360, img_width=640, num_frames=5,
+        num_mem_frames=2, num_prev_frames=2,
         patch_size=2, token_embed_dim=16,
         vae_seq_h=18, vae_seq_w=32,
         st_embed_dim=256,
@@ -62,6 +63,8 @@ class WorldMAR(pl.LightningModule):
         self.gradient_clip_val = gradient_clip_val
         self.seq_h, self.seq_w = vae_seq_h // patch_size, vae_seq_w // patch_size
         self.frame_seq_len = self.seq_h * self.seq_w
+        self.num_mem_frames = num_mem_frames
+        self.num_prev_frames = num_prev_frames
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
@@ -228,51 +231,53 @@ class WorldMAR(pl.LightningModule):
         x = x.reshape(bsz, h_ * p * w_ * p, c)
         return x  # [bsz, (h w), c]
     
-    def sample_orders(self, batch_size):
+    def shuffled_token_indices(self, batch_size):
         # contains B randomized vectors of indices going from 0, 1, ..., HW-1
-        orders = []
+        indices = []
 
         for _ in range(batch_size):
-            order = np.array(list(range(self.frame_seq_len)))           # (HW)
-            np.random.shuffle(order)                                    # (HW)
-            orders.append(order)
+            order = np.array(list(range(self.frame_seq_len)))  # (HW)
+            np.random.shuffle(order)                           # (HW)
+            indices.append(order)
 
-        orders = torch.Tensor(np.array(orders)).to(self.device).long()  # (B, HW)
-        return orders
+        indices = torch.Tensor(np.array(indices)).to(self.device).long()  # (B, HW)
+        return indices
 
-    def random_masking(self, x, orders, random_offset=False, masking_rate=None):
-        B = x.shape[0]
+    def random_masking(self, x, masking_rate=None):
+        B, T, H, W, D = x.shape
+        P = self.num_prev_frames
+        L = self.frame_seq_len
+        assert self.frame_seq_len == H*W
 
-        mask_rate = self.mask_ratio_generator.rvs(1)[0] if not masking_rate else masking_rate
-        num_masked_tokens = int(np.ceil(self.frame_seq_len * mask_rate))
-        mask = torch.zeros((B, self.frame_seq_len), dtype=bool, device=x.device)  # (B, HW)
+        # determine how many tokens should me masked in each non-memory context frame
+        pred_mask_rate = self.mask_ratio_generator.rvs(1)[0] if not masking_rate else masking_rate
+        num_masked_pred = int(np.ceil(L * pred_mask_rate))
+        num_masked_ctx = int(num_masked_pred * self.prev_masking_rate)
 
-        if random_offset:
-            # All frames have random masking as regularlization; pick a random frame to actually
-            # predict over (masks on that particular frame become tokens that are diffused over)
-            offsets = torch.randint(high=self.num_frames, size=B, dtype=torch.int64, device=self.device)  # (B)
-        else:
-            # Predict the last frame (at index 0)
-            offsets = torch.zeros(B, dtype=torch.int64, device=x.device)                                  # (B)
-
+        # random mask for the frame to be predicted (by default, final frame at index 0)
+        mask = torch.zeros((B, L), dtype=bool, device=x.device)  # (B, HW)
+        pred_orders = self.shuffled_token_indices(B)
         pred_mask = torch.scatter(
             mask,
             dim=-1, 
-            index=orders[:, :num_masked_tokens], 
-            src=torch.ones(B, self.frame_seq_len, dtype=bool, device=x.device)
+            index=pred_orders[:, :num_masked_pred], 
+            src=torch.ones(B, L, dtype=bool, device=x.device)
         )  # (B, HW)
         
-        if self.training and not random_offset:
-            prev_mask = torch.scatter(
-                mask, 
-                dim=-1, 
-                index=orders[:, :int(num_masked_tokens*self.prev_masking_rate)],
-                src=torch.ones(B, self.frame_seq_len, dtype=bool, device=x.device)
-            )  # (B, HW)
+        # random masks for previous non-memory context frames (attention-masks not MAR masks for diffused tokens)
+        if self.training:
+            ctx_masks = torch.zeros((B, P, L), dtype=torch.bool, device=x.device)  # (B, P, HW)
+            for p in range(P):
+                ctx_orders = self.shuffled_token_indices(B)
+                ctx_masks[:, p, :] = torch.zeros((B, L), dtype=torch.bool, device=x.device).scatter(
+                    dim=-1,
+                    index=ctx_orders[:, :num_masked_ctx],
+                    src=torch.ones((B, L), dtype=torch.bool, device=x.device)
+                )
         else:
-            prev_mask = None
+            ctx_masks = None
 
-        return pred_mask, prev_mask, offsets  # (B, HW), (B, HW), (B)
+        return pred_mask, ctx_masks  # (B, HW), (B, P, HW)
 
     def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False):
         B, T, H, W, D = x.shape
@@ -395,11 +400,16 @@ class WorldMAR(pl.LightningModule):
         loss = self.diffloss(z=z, target=target, mask=mask)
         return loss
 
-    def construct_attn_masks(self, x, mask, offsets, prev_mask=None, padding_mask=None):
+    def construct_attn_masks(self, x, pred_mask, pred_idx=0, ctx_mask=None, padding_mask=None):
         B, T, H, W, D = x.shape
-        batch_idx = torch.arange(B, device=self.device)  # (B)
+        P = self.num_prev_frames
 
-        # --- spatial attn mask ---
+        ctx_mask_left = ctx_mask[:, :pred_idx, :]
+        ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
+        ctx_mask_right = ctx_mask[:, pred_idx:, :]
+        ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, (H+1)W)
+
+        # --- spatial attn masks ---
         valid_hw = torch.ones(B, T, (H+1)*W, dtype=torch.bool, device=self.device)  # (B, T, (H+1)W)
 
         if padding_mask is not None:
@@ -407,17 +417,16 @@ class WorldMAR(pl.LightningModule):
             # and padding_mask[:, t] = 0 if the frame at timestep t is padding)
             valid_hw &= padding_mask.unsqueeze(-1)  # (B, T, (H+1)W)
 
-        if prev_mask is not None:
-            # set random tokens of the previous frame (time index 1) to be masked (i.e. set to 0)
-            offsets_prev = torch.ones_like(offsets, dtype=torch.int64, device=self.device)  # (B)
-            valid_hw[batch_idx, offsets_prev] = ~prev_mask  # (B, T, (H+1)W)
+        if self.training:
+            # mask random tokens of previous non-memory context frames (i.e. set to 0)
+            valid_hw[:, -P:, :] = ~ctx_mask  # (B, T, (H+1)W)
 
         # construct the decoder spatial attention mask
         # --------------------------------------------*
         # valid_hw.unsqueeze(-1) is (B, T, (H+1)W, 1) |
         # valid_hw.unsqueeze(-2) is (B, T, 1, (H+1)W) |
         # --------------------------------------------*
-        # this outer-product logical AND operation broadcasts both into (B, T, (H+1)W, (H+1)W) 
+        # this outer-product logical AND operation broadcasts both into (B, T, (H+1)W, (H+1)W)
         # so that s_attn_mak[b, t, i, j] = 1 iff tokens i and j are individually valid within frame t
         s_attn_mask_dec = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
         # attention mechanism expects (B, num_heads, sequence_len, sequence_len) mask, but all heads have same mask
@@ -425,27 +434,25 @@ class WorldMAR(pl.LightningModule):
         
         # construct the encoder spatial attention mask in a similar fashion
         # but prevent any masked tokens on the predicted frame from being seen
-        valid_hw[batch_idx, offsets] = ~mask
+        valid_hw[:, pred_idx, :] = ~pred_mask
         s_attn_mask_enc = valid_hw.unsqueeze(-1) & valid_hw.unsqueeze(-2)
         s_attn_mask_enc = rearrange(s_attn_mask_enc, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
 
         # --- temporal attn mask ---
-        valid_t = torch.ones(B, (H+1)*W, T, dtype=torch.bool, device=self.device)      # (B, (H+1)W, T)
+        valid_t = torch.ones(B, (H+1)*W, T, dtype=torch.bool, device=self.device)    # (B, (H+1)W, T)
         _, L, _ = valid_t.shape
-        batch_idx = batch_idx.unsqueeze(1).expand(-1, L)                               # (B, L)
-        len_idx   = torch.arange(L, device=valid_t.device).unsqueeze(0).expand(B, -1)  # (B, L)
-        depth_idx = offsets.unsqueeze(1).expand(-1, L)                                 # (B, L)
+        batch_idx = batch_idx.unsqueeze(1).expand(-1, L, P)                              # (B, L, P)
+        len_idx = torch.arange(L, device=valid_t.device).unsqueeze(0).expand(B, -1, P)   # (B, L, P)
+        time_idx = torch.arange(P, device=valid_t.device).unsqueeze(0).expand(B, L, -1)  # (B, L, P)
 
         if padding_mask is not None:
             # mask out entire frames if they were added as padding (padding_mask is (B, T),
             # and padding_mask[:, t] = 0 if the frame at timestep t is padding)
-            valid_t &= padding_mask.unsqueeze(1)  # (B, (H+1)W, T)
+            valid_t &= padding_mask.unsqueeze(-2)  # (B, (H+1)W, T)
 
-        if prev_mask is not None:
-            # prev_mask is (B, (H+1)W) = (B, L)
-            # zero out every place that has been spatially masked with prev_mask in the selected pred frame timestep
-            prev_depth_idx = offsets_prev.unsqueeze(1).expand(-1, L)  # (B, L)
-            valid_t[batch_idx[prev_mask], len_idx[prev_mask], prev_depth_idx[prev_mask]] = False
+        if self.training:
+            # mask random tokens of previous non-memory context frames (i.e. set to 0)
+            valid_t[batch_idx[ctx_mask], len_idx[ctx_mask], time_idx[ctx_mask]] = False
 
         # construct the decoder temporal attention mask using the outer-product logical AND
         t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
@@ -453,37 +460,37 @@ class WorldMAR(pl.LightningModule):
 
         # construct the encoder temporal attention mask in a similar fashion
         # but prevent any masked tokens on the predicted frame from being seen
-        valid_t[batch_idx[mask], len_idx[mask], depth_idx[mask]] = False
+        valid_t[:, :, pred_idx] = pred_mask.unsqueeze(-1)
         t_attn_mask_enc = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
         t_attn_mask_enc = rearrange(t_attn_mask_enc, "b hw t1 t2 -> (b hw) 1 t1 t2")
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def masked_encoder_decoder(self, x, actions, poses, timestamps, padding_mask=None, masking_rate=None):
+    def masked_encoder_decoder(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None, masking_rate=None):
         B = x.shape[0]
 
-        # 1) patchify latents
+        # patchify latents
         x = rearrange(x, "b t s c -> (b t) s c")
         x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
         x = rearrange(x, "(b t) h w d -> b t h w d", b=B)
         x_gt = x.clone().detach()
 
-        # 2) gen mask
+        # generate masks for all frames in previous frame window
         B, T, H, W, D = x.shape
-        orders = self.sample_orders(B)
-        pred_mask, prev_mask, offsets = self.random_masking(x, orders, random_offset=self.mask_random_frame, masking_rate=masking_rate)  # (B, HW), (B, HW), (B)
+        P = self.num_prev_frames
+        pred_mask, ctx_mask = self.random_masking(x, masking_rate=masking_rate)                                                 # (B, HW), (B, P, HW)
         padded_pred_mask = rearrange(pred_mask, "b (h w) -> b h w", h=H)                                                        # (B, H, W)
         padded_pred_mask = torch.cat([padded_pred_mask, torch.zeros((B, 1, W), dtype=torch.bool, device=self.device)], dim=-2)  # (B, H+1, W)
         padded_pred_mask = rearrange(padded_pred_mask, "b h w -> b (h w)")                                                      # (B, (H+1)W)
 
-        if prev_mask is not None:
-            padded_prev_mask = rearrange(prev_mask, "b (h w) -> b h w", h=H)                                                      # (B, H, W)
-            padded_prev_mask = torch.cat([padded_prev_mask, torch.zeros(B, 1, W, dtype=torch.bool, device=self.device)], dim=-2)  # (B, H+1, W))
-            padded_prev_mask = rearrange(padded_prev_mask, "b h w -> b (h w)")                                                    # (B, (H+1)W)
+        if ctx_mask is not None:
+            padded_ctx_mask = rearrange(ctx_mask, "b p (h w) -> b p h w", p=P, h=H)                                                # (B, P, H, W)
+            padded_ctx_mask = torch.cat([padded_ctx_mask, torch.zeros(B, P, 1, W, dtype=torch.bool, device=self.device)], dim=-2)  # (B, P, H+1, W)
+            padded_ctx_mask = rearrange(padded_ctx_mask, "b h w -> b (h w)")                                                       # (B, (H+1)W)
 
         # 3) construct attn_masks
         (s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(
-            x, padded_pred_mask, offsets, prev_mask=padded_prev_mask, padding_mask=padding_mask
+            x, padded_pred_mask, pred_idx=pred_idx, ctx_mask=padded_ctx_mask, padding_mask=padding_mask
         )
 
         # 4) run encoder
