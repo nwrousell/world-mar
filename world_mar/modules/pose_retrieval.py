@@ -342,7 +342,8 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, num_prev
     for prev_frame_idx in forced_prev_frame_indices:
         # directly carve out all points in the overlapping region; subsequent memory frame
         # candidates will have to overlap different points to be considered
-        in_fov1 = in_fov1 & ~in_fov_list[prev_frame_idx]
+        if prev_frame_idx < len(in_fov_list):
+            in_fov1 = in_fov1 & ~in_fov_list[prev_frame_idx]
 
     for _ in range(k - len(forced_prev_frame_indices)):
         # exit the retrieval loop if there aren't enough new points left

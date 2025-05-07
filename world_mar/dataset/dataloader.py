@@ -394,6 +394,9 @@ class MinecraftDataset(Dataset):
         candidate_ctx_indices = candidate_ctx_indices[candidate_ctx_indices >= 0]           # filter out frame indices that are negative
         candidate_ctx_indices = candidate_ctx_indices[~is_gui_open[candidate_ctx_indices]]  # filter out frames where the GUI is open
 
+        if len(candidate_ctx_indices) == 0:
+            candidate_ctx_indices = torch.tensor([frame_idx - 1], dtype=torch.int64)
+
         # retrieve final context frame indices using forced prev frames and overlap based memory frames
         retrieved_indices = get_most_relevant_poses_to_target(
             target_pose=pose_matrix[frame_idx],
@@ -403,7 +406,7 @@ class MinecraftDataset(Dataset):
             k=self.num_context_frames,
             num_prev_frames=self.num_prev_frames
         )
-        context_indices = candidate_ctx_indices[retrieved_indices].sort(descending=True)
+        context_indices = candidate_ctx_indices[retrieved_indices[:len(candidate_ctx_indices)]].sort(descending=True)[0]
 
         # concatenate the target frame and context frame indices
         frame_indices = torch.cat([torch.tensor([frame_idx]), context_indices])
@@ -421,19 +424,29 @@ class MinecraftDataset(Dataset):
 
         # add padding frames if necessary
         num_non_padding_frames = len(frames)
+
         if len(frames) < self.num_context_frames + 1:
             num_padding = self.num_context_frames + 1 - len(frames)
             plucker = torch.cat([plucker, torch.zeros((num_padding, *plucker[0].shape))], dim=0)
 
             for _ in range(num_padding):
                 frames.append(torch.zeros_like(frames[-1]))
-            
+
             frame_indices = torch.cat([frame_indices, torch.full((num_padding,), -1)])
 
         frames = torch.stack(frames, axis=0)
+        assert len(plucker) == self.num_context_frames + 1
         assert len(frames) == self.num_context_frames + 1
+
+        # add padding actions if necessary (the final frame does not have an action, hence no +1)
         actions = action_matrix[context_indices]
+        if len(actions) < self.num_context_frames:
+            num_padding = self.num_context_frames - len(actions)
+            actions = torch.cat([actions, torch.zeros((num_padding, *actions[0].shape))], dim=0)
+        assert len(actions) == self.num_context_frames
+
         timestamps = frame_indices - frame_idx
+        assert len(timestamps) == self.num_context_frames + 1
 
         return {
             "frames": frames,
