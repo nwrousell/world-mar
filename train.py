@@ -22,7 +22,7 @@ from world_mar.dataset.dataloader import MinecraftDataModule
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=500):
+    def __init__(self, log_every_n_steps=10):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -59,7 +59,7 @@ class ImageLogger(pl.Callback):
         trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
 
 class MaskedImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=500):
+    def __init__(self, log_every_n_steps=10):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -96,8 +96,9 @@ class MaskedImageLogger(pl.Callback):
 
         # construct mask going through entire previous nom-memory context frame window
         ctx_mask_left = ctx_mask[:, :pred_idx, :]
-        ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool)
+        ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
         ctx_mask_right = ctx_mask[:, pred_idx:, :]
+        print(ctx_mask_left.shape, ctx_mask_middle.shape, ctx_mask_right.shape)
         ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, H_patch*W_patch)
 
         # compute pixel‐patch dims

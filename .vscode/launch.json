@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "train.py",
             "console": "integratedTerminal",
-            "args": "-c configs/world_mar.yaml -d ../minecraft_seq"
+            "args": "-c configs/world_mar_l_debug.yaml -d ../minecraft_seq_tiny"
         }
     ]
 }

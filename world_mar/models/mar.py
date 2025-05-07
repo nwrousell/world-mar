@@ -39,7 +39,7 @@ class WorldMAR(pl.LightningModule):
         self, 
         vae_config=None, # should be an AutoencoderKL 
         img_height=360, img_width=640, num_frames=5,
-        num_mem_frames=2, num_prev_frames=2,
+        num_mem_frames=2, num_prev_frames=3,
         patch_size=2, vae_embed_dim=16,
         vae_seq_h=18, vae_seq_w=32,
         st_embed_dim=256,
@@ -453,7 +453,7 @@ class WorldMAR(pl.LightningModule):
             valid_t[batch_idx[ctx_mask], len_idx[ctx_mask], time_idx[ctx_mask]] = False
 
         # construct the decoder temporal attention mask using the outer-product logical AND
-        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
+        t_attn_mask_dec = valid_t.unsqueeze(-1) & valid_t.unsqueeze(-2)
         t_attn_mask_dec = rearrange(t_attn_mask_dec, "b hw t1 t2 -> (b hw) 1 t1 t2")
 
         # construct the encoder temporal attention mask in a similar fashion
