@@ -1,0 +1,26 @@
+model:
+  learning_rate: 5e-5 # from MAR for img gen paper
+  target: world_mar.models.mar.WorldMAR
+  params:
+    vae_config:
+      target: world_mar.oasis_utils.vae.ViT_L_20_Shallow_Encoder 
+      params:
+        load_from_ckpt: checkpoints/oasis/vit-l-20.safetensors
+    encoder_depth: 12
+    decoder_depth: 12
+    encoder_num_heads: 12
+    decoder_num_heads: 12
+    st_embed_dim: 512
+    diffloss_w: 512
+    num_frames: 2
+
+dataloader:
+  target: world_mar.dataset.dataloader.MinecraftDataModule
+  params:
+    dataset_dir: "../minecraft-raw/"
+    batch_sz: 128
+    memory_distance: 1000
+    memory_size: 100
+    train_split: 0.995 # 0.01 for val
+    num_context_frames: 1
+    num_workers: 16
