@@ -11,12 +11,13 @@ model:
     st_embed_dim: 512
     diffloss_w: 512
     num_frames: 4
+    prev_masking_rate: 0.25
 
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
   params:
-    dataset_dir: "../minecraft-7x/"
-    batch_sz: 96
+    dataset_dir: "/users/nrousell/scratch/first-third"
+    batch_sz: 64
     memory_distance: 1000
     memory_size: 100
     train_split: 0.99 # 0.01 for val

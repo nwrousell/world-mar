@@ -22,7 +22,7 @@ from world_mar.dataset.dataloader import MinecraftDataModule
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=500):
+    def __init__(self, log_every_n_steps=10):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -59,7 +59,7 @@ class ImageLogger(pl.Callback):
         trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
 
 class MaskedImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=500):
+    def __init__(self, log_every_n_steps=10):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -78,7 +78,7 @@ class MaskedImageLogger(pl.Callback):
         timestamps    = batch["timestamps"].to(device)[:num_to_sample]
 
         # sample latents
-        sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes)
+        sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes, prev_masking=True)
 
         # decode to frames
         to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
@@ -98,7 +98,7 @@ class MaskedImageLogger(pl.Callback):
         ctx_mask_left = ctx_mask[:, :pred_idx, :]
         ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
         ctx_mask_right = ctx_mask[:, pred_idx:, :]
-        print(ctx_mask_left.shape, ctx_mask_middle.shape, ctx_mask_right.shape)
+        # print(ctx_mask_left.shape, ctx_mask_middle.shape, ctx_mask_right.shape)
         ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, H_patch*W_patch)
 
         # compute pixel‐patch dims
