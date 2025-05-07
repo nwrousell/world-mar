@@ -183,7 +183,6 @@ def main(args):
         now = datetime.datetime.now().strftime("%m-%d-T%H-%M-%S")
         name = now + "_" + cfg_fname
 
-    if not args.resume:
     logdir = os.path.join(LOG_PARENT, name)
     os.makedirs(logdir, exist_ok=True)
     shutil.copy(args.config, os.path.join(logdir, os.path.basename(args.config)))
