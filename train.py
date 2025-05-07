@@ -29,31 +29,95 @@ class ImageLogger(pl.Callback):
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         global_step = trainer.global_step
 
-        if global_step % self.log_every_n_steps == 0:
-            num_to_sample = 4
-            latents = batch["frames"].to(pl_module.device)[:num_to_sample]
-            batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:num_to_sample]
-            actions = batch["action"].to(pl_module.device)[:num_to_sample]
-            poses = batch["plucker"].to(pl_module.device)[:num_to_sample]
-            timestamps = batch["timestamps"].to(pl_module.device)[:num_to_sample]
-            
-            # sample latents
-            sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
+        if global_step % self.log_every_n_steps != 0:
+            return
+        
+        num_to_sample = 4
+        latents = batch["frames"].to(pl_module.device)[:num_to_sample]
+        batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:num_to_sample]
+        actions = batch["action"].to(pl_module.device)[:num_to_sample]
+        poses = batch["plucker"].to(pl_module.device)[:num_to_sample]
+        timestamps = batch["timestamps"].to(pl_module.device)[:num_to_sample]
+        
+        # sample latents
+        sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
 
-            # decode to frames
-            # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
-            to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
-            pl_module.vae.to("cuda")
-            with torch.autocast(device_type="cuda", enabled=False):
-                one, two, three, four, five = (((pl_module.vae.decode(to_decode) + 1) / 2) * 255).to(torch.uint8).chunk(chunks=5, dim=0) # each are n c h w
-            pl_module.vae.to("cpu")
+        # decode to frames
+        # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+        to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+        pl_module.vae.to("cuda")
+        with torch.autocast(device_type="cuda", enabled=False):
+            one, two, three, four, five = (
+                ((pl_module.vae.decode(to_decode).clip(-1, 1) + 1) / 2) * 255
+            ).to(torch.uint8).chunk(chunks=5, dim=0)
+        pl_module.vae.to("cpu")
 
-            trifolds = torch.cat([one, two, three, four, five], dim=-1) # concat along width dim
+        trifolds = torch.cat([one, two, three, four, five], dim=-1) # concat along width dim
 
-            wandb_images = [wandb.Image(img) for img in trifolds]
+        wandb_images = [wandb.Image(img) for img in trifolds]
 
-            # Log to W&B
-            trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
+        # Log to W&B
+        trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
+
+class MaskedImageLogger(pl.Callback):
+    def __init__(self, log_every_n_steps=500):
+        super().__init__()
+        self.log_every_n_steps = log_every_n_steps
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        global_step = trainer.global_step
+
+        if global_step % self.log_every_n_steps != 0:
+            return
+
+        num_to_sample = 4
+        device        = pl_module.device
+        latents       = batch["frames"].to(device)[:num_to_sample]
+        batch_nframes = batch["num_non_padding_frames"].to(device)[:num_to_sample]
+        actions       = batch["action"].to(device)[:num_to_sample]
+        poses         = batch["plucker"].to(device)[:num_to_sample]
+        timestamps    = batch["timestamps"].to(device)[:num_to_sample]
+
+        # sample latents
+        sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes)
+
+        # decode to frames
+        # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+        to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+        pl_module.vae.to("cuda")
+        with torch.autocast(device_type="cuda", enabled=False):
+            one, two, three, four, five = (
+                ((pl_module.vae.decode(to_decode).clip(-1, 1) + 1) / 2) * 255
+            ).to(torch.uint8).chunk(chunks=5, dim=0)
+        pl_module.vae.to("cpu")
+
+        # compute pixel‐patch dims
+        B, C, H_pix, W_pix = five.shape
+        latent_h, latent_w = pl_module.vae_seq_h, pl_module.vae_seq_w
+        pix_per_lat_h = H_pix // latent_h
+        pix_per_lat_w = W_pix // latent_w
+        p = pl_module.patch_size
+        H_patch = latent_h // p
+        W_patch = latent_w // p
+
+        # reshape stored mask and black-out masked tokens
+        mask = pl_module._last_pred_mask[:num_to_sample]  # (B, H_patch*W_patch)
+        mask = mask.reshape(B, H_patch, W_patch)
+        for i in range(B):
+            rows, cols = mask[i].nonzero(as_tuple=True)
+            for r, c in zip(rows.tolist(), cols.tolist()):
+                # lower-left and upper-right patch corners
+                y0 =   r   * p * pix_per_lat_h
+                y1 = (r+1) * p * pix_per_lat_h
+                x0 =   c   * p * pix_per_lat_w
+                x1 = (c+1) * p * pix_per_lat_w
+                # blackout the whole patch
+                five[i,:, y0:y1, x0:x1] = 0
+
+        # log to wandb
+        trifolds_masked = torch.cat([one, two, three, four, five], dim=-1)
+        wandb_imgs = [wandb.Image(img) for img in trifolds_masked]
+        trainer.logger.experiment.log({"generated_images_masked": wandb_imgs}, step=global_step)
 
 def get_callbacks(logdir):
     return [
@@ -65,6 +129,7 @@ def get_callbacks(logdir):
             mode="min"
         ),
         ImageLogger(),
+        MaskedImageLogger(),
         LearningRateMonitor(logging_interval='step')
     ]
 
@@ -177,4 +242,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     main(args)
-

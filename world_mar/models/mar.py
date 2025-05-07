@@ -321,7 +321,7 @@ class WorldMAR(pl.LightningModule):
         action_token_buffer = action_embeddings.view(B, T-1, 1, 1, D).repeat(1, 1, 1, W, 1)  # (B, T-1, 1, W, D)
 
         if not is_decoder:
-            # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim) 
+            # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim)
             # concat [ACTION] token buffer to x[:, 1:] (second, third, fourth, ... elements along temporal dim)
             # these concatenations are happening along H, the height dimension (could've been W equivalently)
             x = torch.cat([
@@ -329,7 +329,7 @@ class WorldMAR(pl.LightningModule):
                 torch.cat([x[:, 1:], action_token_buffer], dim=-3)  # (B, T, H+1, W, D)
             ], dim=-4)  # dim=-3 is H and dim=-4 is T
         else:
-            # add [PRED] tokens to x[:, 0, H:, :, :] (extra buffer for first elements along temporal dim) 
+            # add [PRED] tokens to x[:, 0, H:, :, :] (extra buffer for first elements along temporal dim)
             # add [ACTION] tokens to x[:, 1:, H:, :, :] (extra buffer for second, third, fourth, ... elements along temporal dim)
             tokens = torch.cat([pred_token_buffer, action_token_buffer], dim=-4)  # (B, T, 1, W, D)
             x[:, :, H:, :, :] = x[:, :, H:, :, :] + tokens                        # (B, T, H+1, W, D)
@@ -477,7 +477,13 @@ class WorldMAR(pl.LightningModule):
         # generate masks for all frames in previous frame window
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
-        pred_mask, ctx_mask = self.random_masking(x, masking_rate=masking_rate)                                                 # (B, HW), (B, P, HW)
+        pred_mask, ctx_mask = self.random_masking(x, masking_rate=masking_rate)  # (B, HW), (B, P, HW)
+
+        # store for later logging
+        self._last_pred_mask = pred_mask.detach().cpu()
+        self._last_ctx_mask = (ctx_mask.detach().cpu() if ctx_mask is not None else None)
+
+        # add padding along the H dimension (since we concat token buffers for the encoder-decoder to use)
         padded_pred_mask = rearrange(pred_mask, "b (h w) -> b h w", h=H)                                                        # (B, H, W)
         padded_pred_mask = torch.cat([padded_pred_mask, torch.zeros((B, 1, W), dtype=torch.bool, device=self.device)], dim=-2)  # (B, H+1, W)
         padded_pred_mask = rearrange(padded_pred_mask, "b h w -> b (h w)")                                                      # (B, (H+1)W)
@@ -487,23 +493,16 @@ class WorldMAR(pl.LightningModule):
             padded_ctx_mask = torch.cat([padded_ctx_mask, torch.zeros(B, P-1, 1, W, dtype=torch.bool, device=self.device)], dim=-2)  # (B, P-1, H+1, W)
             padded_ctx_mask = rearrange(padded_ctx_mask, "b t h w -> b t (h w)")                                                     # (B, P-1, (H+1)W)
 
-        # 3) construct attn_masks
+        # construct spatial and temporal attention masks for the encoder and decoder
         (s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(
             x, padded_pred_mask, pred_idx=pred_idx, ctx_mask=padded_ctx_mask, padding_mask=padding_mask
         )
 
-        # 4) run encoder
-        x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
-
-        # 5) run decoder
+        z = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
         z = self.forward_decoder(x, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
-        # z : b t h w d
-
-        return z_gt, z, pred_mask
+        return z_gt, z, pred_mask  # (B, T, H, W, D), (B, T, H, W, D), (B, HW)
 
     def forward(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None):
-        b = x.shape[0]
-
         # scale the input tensor x to a standard normal distribution
         x = x * self.scale_factor
         
@@ -511,8 +510,8 @@ class WorldMAR(pl.LightningModule):
         z_gt, z, pred_mask = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_idx, padding_mask)
 
         # split into target frame + diffuse
-        z_t = z[:, pred_idx, :, :, :] # b h w d
-        z_gt_t = z_gt[:, pred_idx, :, :, :] # b h w d
+        z_t = z[:, pred_idx, :, :, :]  # (B, H, W, D)
+        z_gt_t = z_gt[:, pred_idx, :, :, :]  # (B, H, W, D)
         loss = self.forward_diffusion(z_t, z_gt_t, pred_mask)        
         return loss
 
