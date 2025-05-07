@@ -404,7 +404,7 @@ class MinecraftDataset(Dataset):
             points=self.points, 
             min_overlap=0.1, 
             k=self.num_context_frames,
-            num_prev_frames=self.num_prev_frames
+            num_prev_frames=min(self.num_prev_frames, len(candidate_ctx_indices))
         )
         context_indices = candidate_ctx_indices[retrieved_indices[:len(candidate_ctx_indices)]].sort(descending=True)[0]
 
