@@ -183,10 +183,14 @@ def main(args):
         now = datetime.datetime.now().strftime("%m-%d-T%H-%M-%S")
         name = now + "_" + cfg_fname
 
-    logdir = os.path.join(LOG_PARENT, name)
-    os.makedirs(logdir, exist_ok=True)
-    shutil.copy(args.config, os.path.join(logdir, os.path.basename(args.config)))
-    ckpt_path = find_latest_checkpoint(args.resume) if args.resume else None
+    if not args.resume:
+        logdir = os.path.join(LOG_PARENT, name)
+        os.makedirs(logdir, exist_ok=True)
+        shutil.copy(args.config, os.path.join(logdir, os.path.basename(args.config)))
+        ckpt_path = None
+    else:
+        logdir = args.resume
+        ckpt_path = find_latest_checkpoint(args.resume)
     print(f"Initialized logging directory: {logdir}")
 
     # load model and dataloader from config
