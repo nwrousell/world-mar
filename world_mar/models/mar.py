@@ -97,8 +97,8 @@ class WorldMAR(pl.LightningModule):
         self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
         # self.z_proj_ln = nn.LayerNorm(st_embed_dim)
 
-        # special token [PRED] for final frame that must be generated
-        self.pred_token = nn.Parameter(torch.zeros(1, st_embed_dim))
+        # special token [BUF] for scratch space, row of these added onto each frame
+        self.buf_token = nn.Parameter(torch.zeros(1, st_embed_dim))
 
         # encoder spatio-temporal attention blocks
         self.encoder_blocks = nn.ModuleList([
@@ -182,7 +182,7 @@ class WorldMAR(pl.LightningModule):
         return model
 
     def initialize_weights(self):
-        torch.nn.init.kaiming_normal_(self.pred_token)
+        torch.nn.init.kaiming_normal_(self.buf_token)
         torch.nn.init.kaiming_normal_(self.mask_token)
         self.apply(self._init_weights)
 
@@ -242,7 +242,7 @@ class WorldMAR(pl.LightningModule):
         indices = torch.Tensor(np.array(indices)).to(self.device).long()  # (B, HW)
         return indices
 
-    def random_masking(self, x, masking_rate=None, custom_orders=None):
+    def random_masking(self, x, masking_rate=None, custom_orders=None, prev_masking=True):
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
         L = self.frame_seq_len
@@ -264,7 +264,7 @@ class WorldMAR(pl.LightningModule):
         )  # (B, HW)
         
         # random masks for previous non-memory context frames (attention-masks not MAR masks for diffused tokens)
-        if self.training:
+        if prev_masking:
             ctx_masks = torch.zeros((B, P-1, L), dtype=torch.bool, device=x.device)  # (B, P-1, HW)
             for p in range(P-1):
                 ctx_orders = self.shuffled_token_indices(B)
@@ -278,12 +278,12 @@ class WorldMAR(pl.LightningModule):
 
         return pred_mask, ctx_masks  # (B, HW), (B, P-1, HW)
 
-    def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False):
+    def add_pose_action_timestamp_embeddings(self, x, poses, timestamps, actions, is_decoder=False):
         B, T, H, W, D = x.shape
-
+        
         if is_decoder:
-            H -= 1  # encoder would have concatenated buffer onto x's H dim
-            
+            H -= 1
+
         assert timestamps.shape == (B, T)
         assert poses.shape[:2] == (B, T) and poses.shape[-1] == 6
 
@@ -300,38 +300,26 @@ class WorldMAR(pl.LightningModule):
         timestamp_embeddings = timestamp_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
         assert timestamp_embeddings.shape == (B, T, H, W, D)
 
+        # construct action embeddings matching latent shape
+        action_embeddings = self.action_embedder(actions) # (B, D)
+        b, d = action_embeddings.shape
+        action_embeddings = action_embeddings.view((b, 1, 1, 1, d))
+
+        x[:, 0, :H, :, :] = x[:, 0, :H, :, :] + action_embeddings
+
         # return the latent with the embeddings added
         x[:, :, :H, :, :] = x[:, :, :H, :, :] + pose_embeddings + timestamp_embeddings   # (B, T, H or H+1, W, D)
         return x
 
-    def add_pred_and_action_embeddings(self, x, actions, is_decoder=False):
+    def add_buffer_tokens(self, x):
         B, T, H, W, D = x.shape
 
-        if is_decoder:
-            H -= 1  # encoder would have concatenated buffer onto x's H dim
+        # construct [BUF] token buffer (expected to be a slice varying along time-dimension)
+        token_buffer = self.buf_token.view(1, 1, 1, 1, D).repeat(B, 1, 1, W, 1)        # (B, 1, 1, W, D)
 
-        assert actions.shape == (B, T-1, 25)
-
-        # calculate action tokens
-        action_embeddings = self.action_embedder(actions)                                    # (B, T-1, D)
-
-        # construct [PRED] and [ACTION] token buffers (expected to be a slice varying along time-dimension)
-        pred_token_buffer = self.pred_token.view(1, 1, 1, 1, D).repeat(B, 1, 1, W, 1)        # (B, 1, 1, W, D)
-        action_token_buffer = action_embeddings.view(B, T-1, 1, 1, D).repeat(1, 1, 1, W, 1)  # (B, T-1, 1, W, D)
-
-        if not is_decoder:
-            # concat [PRED] token buffer to x[:, 0] (first elements along temporal dim)
-            # concat [ACTION] token buffer to x[:, 1:] (second, third, fourth, ... elements along temporal dim)
-            # these concatenations are happening along H, the height dimension (could've been W equivalently)
-            x = torch.cat([
-                torch.cat([x[:, 0:1], pred_token_buffer], dim=-3),
-                torch.cat([x[:, 1:], action_token_buffer], dim=-3)  # (B, T, H+1, W, D)
-            ], dim=-4)  # dim=-3 is H and dim=-4 is T
-        else:
-            # add [PRED] tokens to x[:, 0, H:, :, :] (extra buffer for first elements along temporal dim)
-            # add [ACTION] tokens to x[:, 1:, H:, :, :] (extra buffer for second, third, fourth, ... elements along temporal dim)
-            tokens = torch.cat([pred_token_buffer, action_token_buffer], dim=-4)  # (B, T, 1, W, D)
-            x[:, :, H:, :, :] = x[:, :, H:, :, :] + tokens                        # (B, T, H+1, W, D)
+        # concat [BUF] token buffer to x[:, 0] (first elements along temporal dim)
+        # these concatenations are happening along H, the height dimension (could've been W equivalently)
+        x = torch.cat([x[:, 0:1], token_buffer], dim=-3)  # dim=-3 is H and dim=-4 is T
 
         assert x.shape == (B, T, H+1, W, D)
         return x  # (B, T, H+1, W, D)
@@ -345,10 +333,10 @@ class WorldMAR(pl.LightningModule):
         x = self.z_proj(x)                                                  # (B, T, H, W, D)
 
         # add pose and timestamp embeddings
-        x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps)    # (B, T, H, W, D)
+        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions)    # (B, T, H, W, D)
 
-        # add token buffers for prediction, action (on prev frame), and context (on memory frames)
-        x = self.add_pred_and_action_embeddings(x, actions)                 # (B, T, H+1, W, D)
+        # add token buffers for prediction and context (on memory frames)
+        x = self.add_buffer_tokens(x)                 # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         for block in self.encoder_blocks:
@@ -372,10 +360,7 @@ class WorldMAR(pl.LightningModule):
         x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                       # (B, T, H+1, W, D)
 
         # add pose and timestamp embeddings
-        x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps, is_decoder=True)  # (B, T, H+1, W, D)
-
-        # re-add [PRED], and [ACTION] tokens to the token buffers
-        x = self.add_pred_and_action_embeddings(x, actions, is_decoder=True)               # (B, T, H+1, W, D)
+        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions, is_decoder=True)  # (B, T, H+1, W, D)
 
         # pass through each decoder spatio-temporal attention block
         for block in self.decoder_blocks:
@@ -615,7 +600,7 @@ class WorldMAR(pl.LightningModule):
 
         # gen init mask
         orders = self.shuffled_token_indices(B)
-        pred_mask, ctx_mask = self.random_masking(x, masking_rate=1.0, custom_orders=orders) # NOTE: doing fixed ctx mask here for every iter
+        pred_mask, ctx_mask = self.random_masking(x, masking_rate=1.0, custom_orders=orders, prev_masking=False) # NOTE: doing fixed ctx mask here for every iter
         
         for step in range(num_iter):
             # get prediction with cur state of masks
@@ -625,7 +610,7 @@ class WorldMAR(pl.LightningModule):
             # TODO: keeping this rn for sake of cool masking viz,
             #       but we really oughta be sampling w/out masking prev
             masking_rate = np.cos(math.pi / 2. * (step + 1) / num_iter)
-            next_pred_mask, _ = self.random_masking(x, masking_rate=masking_rate, custom_orders=orders)  # just use same ctx mask for viz sake
+            next_pred_mask, _ = self.random_masking(x, masking_rate=masking_rate, custom_orders=orders, prev_masking=False)  # just use same ctx mask for viz sake
             # what we're actually predicting now -- the exclusion of the next mask and cur mask
             cur_pred_mask = torch.logical_xor(pred_mask, next_pred_mask)
 

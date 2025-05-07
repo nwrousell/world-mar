@@ -439,11 +439,11 @@ class MinecraftDataset(Dataset):
         assert len(frames) == self.num_context_frames + 1
 
         # add padding actions if necessary (the final frame does not have an action, hence no +1)
-        actions = action_matrix[context_indices]
-        if len(actions) < self.num_context_frames:
-            num_padding = self.num_context_frames - len(actions)
-            actions = torch.cat([actions, torch.zeros((num_padding, *actions[0].shape))], dim=0)
-        assert len(actions) == self.num_context_frames
+        # actions = action_matrix[context_indices]
+        # if len(actions) < self.num_context_frames:
+        #     num_padding = self.num_context_frames - len(actions)
+        #     actions = torch.cat([actions, torch.zeros((num_padding, *actions[0].shape))], dim=0)
+        # assert len(actions) == self.num_context_frames
 
         timestamps = frame_indices - frame_idx
         assert len(timestamps) == self.num_context_frames + 1
@@ -451,7 +451,7 @@ class MinecraftDataset(Dataset):
         return {
             "frames": frames,
             "plucker": plucker,
-            "action": actions,
+            "action": action_matrix[frame_idx-1],
             "timestamps": timestamps,
             "num_non_padding_frames": num_non_padding_frames
         }
