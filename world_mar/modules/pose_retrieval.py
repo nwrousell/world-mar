@@ -357,7 +357,10 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, num_prev
         # effectively set the confidence of already selected frames to -inf so they
         # won't be chosen again
         if len(top_k) > 0:
-            confidence[torch.tensor(top_k)] = -1e10  
+            try: # TODO: NO
+                confidence[torch.tensor(top_k)] = -1e10  
+            except:
+                pass
 
         _, retrieved_idx = torch.topk(confidence, k=1, dim=0)
         top_k.append(retrieved_idx[0])

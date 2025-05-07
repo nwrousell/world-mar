@@ -1,5 +1,5 @@
 model:
-  learning_rate: 8e-4 # from MAR for img gen paper
+  learning_rate: 5e-5 # from MAR for img gen paper
   target: world_mar.models.mar.WorldMAR
   params:
     vae_config:
@@ -10,13 +10,13 @@ model:
     decoder_depth: 12
     st_embed_dim: 512
     diffloss_w: 512
-    num_frames: 4
+    num_frames: 5
 
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
   params:
     dataset_dir: "../minecraft-7x/"
-    batch_sz: 64
+    batch_sz: 96
     memory_distance: 1000
     memory_size: 100
     train_split: 0.995 # 0.01 for val
