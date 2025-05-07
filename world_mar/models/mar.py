@@ -146,7 +146,7 @@ class WorldMAR(pl.LightningModule):
             num_sampling_steps=num_sampling_steps
         )
         self.diffusion_batch_mul = diffusion_batch_mul
-        self.scale_factor = 0.09
+        self.scale_factor = 0.07843137255
 
         # ----- intialize the vae -----
         if vae_config:
