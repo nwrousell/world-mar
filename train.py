@@ -43,7 +43,6 @@ class ImageLogger(pl.Callback):
         sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
 
         # decode to frames
-        # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
         to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
         pl_module.vae.to("cuda")
         with torch.autocast(device_type="cuda", enabled=False):
@@ -82,7 +81,6 @@ class MaskedImageLogger(pl.Callback):
         sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes)
 
         # decode to frames
-        # to_decode = torch.cat([latents[:, 1], latents[:, 0], sampled_latents], dim=0)
         to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
         pl_module.vae.to("cuda")
         with torch.autocast(device_type="cuda", enabled=False):
@@ -90,6 +88,17 @@ class MaskedImageLogger(pl.Callback):
                 ((pl_module.vae.decode(to_decode).clip(-1, 1) + 1) / 2) * 255
             ).to(torch.uint8).chunk(chunks=5, dim=0)
         pl_module.vae.to("cpu")
+
+        # retrieve token masks and prediction index from forward pass
+        pred_mask = pl_module._last_pred_mask[:num_to_sample]  # (B, H_patch*W_patch)
+        ctx_mask = pl_module._last_ctx_mask[:num_to_sample]    # (B, P-1, H_patch*W_patch)
+        pred_idx = pl_module._last_pred_idx                    # int
+
+        # construct mask going through entire previous nom-memory context frame window
+        ctx_mask_left = ctx_mask[:, :pred_idx, :]
+        ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool)
+        ctx_mask_right = ctx_mask[:, pred_idx:, :]
+        ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, H_patch*W_patch)
 
         # compute pixel‐patch dims
         B, C, H_pix, W_pix = five.shape
@@ -100,19 +109,36 @@ class MaskedImageLogger(pl.Callback):
         H_patch = latent_h // p
         W_patch = latent_w // p
 
-        # reshape stored mask and black-out masked tokens
-        mask = pl_module._last_pred_mask[:num_to_sample]  # (B, H_patch*W_patch)
-        mask = mask.reshape(B, H_patch, W_patch)
+        # white-out masked tokens on pred frame
+        decoded = [one, two, three, four, five]
+        pred_mask = pred_mask.reshape(B, H_patch, W_patch)
         for i in range(B):
-            rows, cols = mask[i].nonzero(as_tuple=True)
+            rows, cols = pred_mask[i].nonzero(as_tuple=True)
             for r, c in zip(rows.tolist(), cols.tolist()):
                 # lower-left and upper-right patch corners
                 y0 =   r   * p * pix_per_lat_h
                 y1 = (r+1) * p * pix_per_lat_h
                 x0 =   c   * p * pix_per_lat_w
                 x1 = (c+1) * p * pix_per_lat_w
-                # blackout the whole patch
-                five[i,:, y0:y1, x0:x1] = 0
+                # whiteout the whole patch
+                five[i,:, y0:y1, x0:x1] = 255
+
+        # black-out masked tokens on other previous non-memory context frames
+        P = ctx_mask.shape[1]
+        ctx_mask = ctx_mask.reshape(B, P, H_patch, W_patch)
+        for p_idx in range(P):
+            mask_p = ctx_mask[:, p_idx, :, :]  # (B, H_patch, W_patch)
+            decoded_idx = (len(decoded) - 1) - p_idx
+            for i in range(B):
+                rows, cols = mask_p[i].nonzero(as_tuple=True)
+                for r, c in zip(rows.tolist(), cols.tolist()):
+                    # lower-left and upper-right patch coners
+                    y0 =   r   * p * pix_per_lat_h
+                    y1 = (r+1) * p * pix_per_lat_h
+                    x0 =   c   * p * pix_per_lat_w
+                    x1 = (c+1) * p * pix_per_lat_w
+                    # blackout the whole patch
+                    decoded[decoded_idx][i, :, y0:y1, x0:x1] = 0
 
         # log to wandb
         trifolds_masked = torch.cat([one, two, three, four, five], dim=-1)

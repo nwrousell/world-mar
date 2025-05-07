@@ -479,9 +479,10 @@ class WorldMAR(pl.LightningModule):
         P = self.num_prev_frames
         pred_mask, ctx_mask = self.random_masking(x, masking_rate=masking_rate)  # (B, HW), (B, P, HW)
 
-        # store for later logging
+        # store for later logging (see MaskedImageLogger class)
         self._last_pred_mask = pred_mask.detach().cpu()
         self._last_ctx_mask = (ctx_mask.detach().cpu() if ctx_mask is not None else None)
+        self._last_pred_idx = pred_idx
 
         # add padding along the H dimension (since we concat token buffers for the encoder-decoder to use)
         padded_pred_mask = rearrange(pred_mask, "b (h w) -> b h w", h=H)                                                        # (B, H, W)
@@ -510,7 +511,7 @@ class WorldMAR(pl.LightningModule):
         z_gt, z, pred_mask = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_idx, padding_mask)
 
         # split into target frame + diffuse
-        z_t = z[:, pred_idx, :, :, :]  # (B, H, W, D)
+        z_t = z[:, pred_idx, :, :, :]        # (B, H, W, D)
         z_gt_t = z_gt[:, pred_idx, :, :, :]  # (B, H, W, D)
         loss = self.forward_diffusion(z_t, z_gt_t, pred_mask)        
         return loss
@@ -591,42 +592,27 @@ class WorldMAR(pl.LightningModule):
             }
         }
 
-    def sample(self, x, actions, poses, timestamps, batch_nframes):
-        # --- parse batch ---
-        # assume the layout is [PREV_FRAME, CTX_FRAMES ...]
-        # frames = format_image(batch["frames"].to(self.device)) # shape [B, T, H, W, C]
-        # batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
-        # actions = batch["action"].to(self.device) # shape [B, 25]
-        # poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]
-        # timestamps = batch["timestamps"].to(self.device) # shape [B, T]
-
-        # --- construct padding_mask ---
+    def sample(self, x, actions, poses, timestamps, batch_nframes, pred_idx=0):
         B, L = len(x), self.num_frames * self.frame_seq_len
 
         # scale the input tensor x to match a standard normal distribution
         x = x * self.scale_factor
 
-        # assert not torch.any(batch_nframes > self.num_frames)
+        # construct padding mask
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
-        z, mask, offsets, x_gt = self.masked_encoder_decoder(x, actions, poses, timestamps, padding_mask=padding_mask, masking_rate=1.0)
+        # pass through main encoder-decoder network to get the latent
+        z_gt, z, pred_mask = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_idx, padding_mask=padding_mask, masking_rate=1.0)
 
         # grab tokens for [MASK] frame
-        batch_idx = torch.arange(B, device=self.device)
-        z_mask = z[batch_idx, offsets] # b h w d
-        # xt_gt = x_gt[batch_idx, offsets] # b h w d
+        z_masked = z[:, pred_idx, :, :, :]  # (B, H, W, D)
 
-        # diffuse
-        z_mask = z_mask + self.diffusion_pos_emb_learned
-        z_mask = rearrange(z_mask, "b h w d -> (b h w) d")
-        
-        # bc we're predicting on all masked at once, this is pretty simple
-        start = time()
-        patch_preds = self.diffloss.sample_ddim(z_mask, cfg=1.0) # (b h w) d
-        end = time()
-        patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
-        # print("out:", patch_preds.shape, end - start)
+        # diffuse the latents on masked tokens
+        z_masked = z_masked + self.diffusion_pos_emb_learned
+        z_masked = rearrange(z_masked, "b h w d -> (b h w) d")
+        patch_preds = self.diffloss.sample_ddim(z_masked, cfg=1.0)                                       # (BHW, D)
+        patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)  # (B, HW, D)
         x_pred = self.unpatchify(patch_preds)
 
         # undo the scaling operation done to the input tensor (recover the original range of values)
