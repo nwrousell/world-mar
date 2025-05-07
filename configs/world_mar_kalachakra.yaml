@@ -24,7 +24,7 @@ model:
     diffloss_d: 3
     num_sampling_steps: '100'
     diffusion_batch_mul: 4
-    prev_masking_rate: 0.5
+    prev_masking_rate: 0.25
     mask_ratio_min: 0.7
     proj_dropout: 0.1
     attn_dropout: 0.1
@@ -41,4 +41,4 @@ dataloader:
     train_split: 0.99 # 0.01 for val
     num_mem_frames: 2
     num_prev_frames: 2
-    num_workers: 4
+    num_workers: 8

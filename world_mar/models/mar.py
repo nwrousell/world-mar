@@ -241,37 +241,43 @@ class WorldMAR(pl.LightningModule):
 
         indices = torch.Tensor(np.array(indices)).to(self.device).long()  # (B, HW)
         return indices
+    
+    def shuffled_token_indices(self, batch_size):
+        HW = self.frame_seq_len
+        perms = [torch.randperm(HW, device=self.device) for _ in range(batch_size)]  # [(HW), ..., (HW)]
+        perms = torch.stack(perms, dim=0)                                            # (B, HW)
+        return perms  # (B, HW)
 
     def random_masking(self, x, masking_rate=None, custom_orders=None, prev_masking=True):
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
-        L = self.frame_seq_len
-        assert self.frame_seq_len == H*W
+        HW = self.frame_seq_len
+        assert HW == H*W
 
         # determine how many tokens should me masked in each non-memory context frame
         pred_mask_rate = self.mask_ratio_generator.rvs(1)[0] if not masking_rate else masking_rate
-        num_masked_pred = int(np.ceil(L * pred_mask_rate))
+        num_masked_pred = int(np.ceil(HW * pred_mask_rate))
         num_masked_ctx = int(num_masked_pred * self.prev_masking_rate)
 
         # random mask for the frame to be predicted (by default, final frame at index 0)
-        mask = torch.zeros((B, L), dtype=bool, device=x.device)  # (B, HW)
+        mask = torch.zeros((B, HW), dtype=bool, device=x.device)  # (B, HW)
         pred_orders = self.shuffled_token_indices(B) if custom_orders is None else custom_orders
         pred_mask = torch.scatter(
             mask,
             dim=-1, 
             index=pred_orders[:, :num_masked_pred], 
-            src=torch.ones(B, L, dtype=bool, device=x.device)
+            src=torch.ones(B, HW, dtype=bool, device=x.device)
         )  # (B, HW)
         
         # random masks for previous non-memory context frames (attention-masks not MAR masks for diffused tokens)
         if prev_masking:
-            ctx_masks = torch.zeros((B, P-1, L), dtype=torch.bool, device=x.device)  # (B, P-1, HW)
+            ctx_masks = torch.zeros((B, P-1, HW), dtype=torch.bool, device=x.device)  # (B, P-1, HW)
             for p in range(P-1):
                 ctx_orders = self.shuffled_token_indices(B)
-                ctx_masks[:, p, :] = torch.zeros((B, L), dtype=torch.bool, device=x.device).scatter(
+                ctx_masks[:, p, :] = torch.zeros((B, HW), dtype=torch.bool, device=x.device).scatter(
                     dim=-1,
                     index=ctx_orders[:, :num_masked_ctx],
-                    src=torch.ones((B, L), dtype=torch.bool, device=x.device)
+                    src=torch.ones((B, HW), dtype=torch.bool, device=x.device)
                 )
         else:
             ctx_masks = None
@@ -296,30 +302,29 @@ class WorldMAR(pl.LightningModule):
         timestamps = rearrange(timestamps, "b t -> (b t)")                               # (BT)
         timestamp_embeddings = self.timestamp_embedder(timestamps)                       # (BT, D)
         timestamp_embeddings = rearrange(timestamp_embeddings, "(b t) d -> b t d", b=B)  # (B, T, D)
-        timestamp_embeddings = timestamp_embeddings.unsqueeze(2).unsqueeze(3)            # (B, T, 1, 1, D)
-        timestamp_embeddings = timestamp_embeddings.expand((-1, -1, H, W, -1))           # (B, T, H, W, D)
+        timestamp_embeddings = timestamp_embeddings.view(B, T, 1, 1, D)                  # (B, T, 1, 1, D)
+        timestamp_embeddings = timestamp_embeddings.expand(-1, -1, H, W, -1)             # (B, T, H, W, D)
         assert timestamp_embeddings.shape == (B, T, H, W, D)
 
         # construct action embeddings matching latent shape
-        action_embeddings = self.action_embedder(actions) # (B, D)
-        b, d = action_embeddings.shape
-        action_embeddings = action_embeddings.view((b, 1, 1, d)) # add singleton dims for h and w
-
-        x[:, 0, :H, :, :] = x[:, 0, :H, :, :] + action_embeddings
+        action_embeddings = self.action_embedder(actions)                   # (B, D)
+        action_embeddings = rearrange(action_embeddings, 'b d -> b 1 1 d')  # add singleton dims for H and W
 
         # return the latent with the embeddings added
-        x[:, :, :H, :, :] = x[:, :, :H, :, :] + pose_embeddings + timestamp_embeddings   # (B, T, H or H+1, W, D)
-        return x
+        x[:, 0, :H, :, :] = x[:, 0, :H, :, :] + action_embeddings  # only final pred frame gets action embeddings
+        x[:, :, :H, :, :] = x[:, :, :H, :, :] + pose_embeddings + timestamp_embeddings   
+
+        return x  # (B, T, H or H+1, W, D)
 
     def add_buffer_tokens(self, x):
         B, T, H, W, D = x.shape
 
         # construct [BUF] token buffer (expected to be a slice varying along time-dimension)
-        token_buffer = self.buf_token.view(1, 1, 1, 1, D).repeat(B, T, 1, W, 1)        # (B, 1, 1, W, D)
+        token_buffer = self.buf_token.view(1, 1, 1, 1, D).repeat(B, T, 1, W, 1)  # (B, T, 1, W, D)
 
         # concat [BUF] token buffer
         # these concatenations are happening along H, the height dimension
-        x = torch.cat([x, token_buffer], dim=-3)  # dim=-3 is H and dim=-4 is T
+        x = torch.cat([x, token_buffer], dim=-3)  # dim=-3 is H
 
         assert x.shape == (B, T, H+1, W, D)
         return x  # (B, T, H+1, W, D)
@@ -330,20 +335,20 @@ class WorldMAR(pl.LightningModule):
         # poses:   (B, T, 40H, 40W, 6)
 
         # project and layer normalize
-        x = self.z_proj(x)                                                  # (B, T, H, W, D)
+        x = self.z_proj(x)                                                            # (B, T, H, W, D)
 
         # add pose and timestamp embeddings
-        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions)    # (B, T, H, W, D)
+        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions)  # (B, T, H, W, D)
 
         # add token buffers for prediction and context (on memory frames)
-        x = self.add_buffer_tokens(x)                 # (B, T, H+1, W, D)
+        x = self.add_buffer_tokens(x)                                                 # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         for block in self.encoder_blocks:
-            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)  # (B, T, H+1, W, D)
+            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)            # (B, T, H+1, W, D)
         
         # final layer norm before passing to the decoder
-        x = self.encoder_norm(x)                                            # (B, T, H+1, W, D)
+        x = self.encoder_norm(x)                                                      # (B, T, H+1, W, D)
 
         return x  # (B, T, H+1, W, D)
 
@@ -354,23 +359,23 @@ class WorldMAR(pl.LightningModule):
         H -= 1  # encoder would have concatenated token buffer onto x's H dim
 
         # convert mask and offsets into separate space and time masks
-        s_mask = mask.view(B, 1, H+1, W)                                                   # (B, 1, H+1, W)
-        t_mask = (torch.arange(T, device=self.device) == pred_idx).view(1, T, 1, 1)        # (1, T, 1, 1)
-        full_mask = s_mask & t_mask                                                        # (B, T, H+1, W)
-        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                       # (B, T, H+1, W, D)
+        s_mask = mask.view(B, 1, H+1, W)                                             # (B, 1, H+1, W)
+        t_mask = (torch.arange(T, device=self.device) == pred_idx).view(1, T, 1, 1)  # (1, T, 1, 1)
+        full_mask = s_mask & t_mask                                                  # (B, T, H+1, W)
+        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                 # (B, T, H+1, W, D)
 
         # add pose and timestamp embeddings
         x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions, is_decoder=True)  # (B, T, H+1, W, D)
 
         # pass through each decoder spatio-temporal attention block
         for block in self.decoder_blocks:
-            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)                 # (B, T, H+1, W, D)
+            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)           # (B, T, H+1, W, D)
 
         # final layer norm before passing to the diffusion backbone
-        x = self.decoder_norm(x)                                                           # (B, T, H+1, W, D)
+        x = self.decoder_norm(x)                                                     # (B, T, H+1, W, D)
 
         # remove the extra token buffer that was concatenated by the encoder onto x's H dim
-        x = x[:, :, :H, :, :]                                                              # (B, T, H, W, D)
+        x = x[:, :, :H, :, :]                                                        # (B, T, H, W, D)
 
         return x  # (B, T, H, W, D)
     
@@ -422,11 +427,11 @@ class WorldMAR(pl.LightningModule):
         s_attn_mask_enc = rearrange(s_attn_mask_enc, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
 
         # --- temporal attn mask ---
-        valid_t = torch.ones(B, (H+1)*W, T, dtype=torch.bool, device=self.device)          # (B, (H+1)W, T)
-        _, L, _ = valid_t.shape
-        batch_idx = torch.arange(B, device=valid_t.device).view(B, 1, 1).expand(-1, P, L)  # (B, P, L)
-        time_idx = torch.arange(P, device=valid_t.device).view(1, P, 1).expand(B, -1, L)   # (B, P, L)
-        len_idx = torch.arange(L, device=valid_t.device).view(1, 1, L).expand(B, P, -1)    # (B, P, L)
+        L = (H+1)*W
+        valid_t = torch.ones(B, L, T, dtype=torch.bool, device=self.device)                # (B, (H+1)W, T)
+        batch_idx = torch.arange(B, device=valid_t.device).view(B, 1, 1).expand(-1, P, L)  # (B, P, (H+1)W)
+        time_idx = torch.arange(P, device=valid_t.device).view(1, P, 1).expand(B, -1, L)   # (B, P, (H+1)W)
+        len_idx = torch.arange(L, device=valid_t.device).view(1, 1, L).expand(B, P, -1)    # (B, P, (H+1)W)
 
         if padding_mask is not None:
             # mask out entire frames if they were added as padding (padding_mask is (B, T),
