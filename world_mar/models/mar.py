@@ -51,7 +51,7 @@ class WorldMAR(pl.LightningModule):
         proj_dropout=0.1,
         attn_dropout=0.1,
         gradient_clip_val=1.0,
-        warmup_steps=13500,  # TODO: change this depending on dataset size
+        warmup_steps=10000,  # TODO: change this depending on dataset size
         **kwargs
     ):
         super().__init__()
@@ -568,13 +568,13 @@ class WorldMAR(pl.LightningModule):
         optim = AdamW(self.parameters(), lr=self.learning_rate)
         warmup_sched = LinearLR(
             optim,
-            start_factor=2e-1,   # or 0.0
+            start_factor=4e-1,
             end_factor=1.0,
             total_iters=self.warmup_steps
         )
         cosine_sched = CosineAnnealingLR(
             optim,
-            T_max=self.warmup_steps * 50 - self.warmup_steps,
+            T_max=100_000,
             eta_min=0.0
         )
         scheduler = SequentialLR(
