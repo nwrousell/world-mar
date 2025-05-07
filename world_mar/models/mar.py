@@ -40,13 +40,13 @@ class WorldMAR(pl.LightningModule):
         vae_config=None, # should be an AutoencoderKL 
         img_height=360, img_width=640, num_frames=5,
         num_mem_frames=2, num_prev_frames=2,
-        patch_size=2, token_embed_dim=16,
+        patch_size=2, vae_embed_dim=16,
         vae_seq_h=18, vae_seq_w=32,
         st_embed_dim=256,
         encoder_depth=8, encoder_num_heads=8,
         decoder_depth=8, decoder_num_heads=8,
         diffloss_w=256, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
-        mask_random_frame=False, prev_masking_rate=0.5,
+        prev_masking_rate=0.5,
         mask_ratio_min=0.7,
         proj_dropout=0.1,
         attn_dropout=0.1,
@@ -68,7 +68,6 @@ class WorldMAR(pl.LightningModule):
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
-        self.mask_random_frame = mask_random_frame
         self.mask_ratio_generator = stats.truncnorm((mask_ratio_min - 1.0) / 0.25, 0, loc=1.0, scale=0.25)
         self.prev_masking_rate = prev_masking_rate
 
@@ -94,7 +93,7 @@ class WorldMAR(pl.LightningModule):
         # ----- encoder -----
         # initial projection
         self.patch_size = patch_size
-        self.token_embed_dim = token_embed_dim * patch_size**2
+        self.token_embed_dim = vae_embed_dim * patch_size**2
         self.z_proj = nn.Linear(self.token_embed_dim, st_embed_dim, bias=True) # projs VAE latents to transformer dim
         # self.z_proj_ln = nn.LayerNorm(st_embed_dim)
 
@@ -153,7 +152,7 @@ class WorldMAR(pl.LightningModule):
             self.instantiate_vae(vae_config)
             assert isinstance(self.vae, AutoencoderKL)
             self.vae_embed_dim = self.vae.latent_dim
-            assert self.vae.latent_dim == token_embed_dim
+            assert self.vae.latent_dim == vae_embed_dim
             assert self.vae.seq_h == vae_seq_h and self.vae.seq_w == vae_seq_w
 
         self.vae_seq_h = 18
@@ -266,8 +265,8 @@ class WorldMAR(pl.LightningModule):
         
         # random masks for previous non-memory context frames (attention-masks not MAR masks for diffused tokens)
         if self.training:
-            ctx_masks = torch.zeros((B, P, L), dtype=torch.bool, device=x.device)  # (B, P, HW)
-            for p in range(P):
+            ctx_masks = torch.zeros((B, P-1, L), dtype=torch.bool, device=x.device)  # (B, P-1, HW)
+            for p in range(P-1):
                 ctx_orders = self.shuffled_token_indices(B)
                 ctx_masks[:, p, :] = torch.zeros((B, L), dtype=torch.bool, device=x.device).scatter(
                     dim=-1,
@@ -277,7 +276,7 @@ class WorldMAR(pl.LightningModule):
         else:
             ctx_masks = None
 
-        return pred_mask, ctx_masks  # (B, HW), (B, P, HW)
+        return pred_mask, ctx_masks  # (B, HW), (B, P-1, HW)
 
     def add_pose_and_timestamp_embeddings(self, x, poses, timestamps, is_decoder=False):
         B, T, H, W, D = x.shape
@@ -350,7 +349,6 @@ class WorldMAR(pl.LightningModule):
 
         # add token buffers for prediction, action (on prev frame), and context (on memory frames)
         x = self.add_pred_and_action_embeddings(x, actions)                 # (B, T, H+1, W, D)
-        x = self.z_proj_ln(x)                                               # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         for block in self.encoder_blocks:
@@ -403,10 +401,11 @@ class WorldMAR(pl.LightningModule):
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
 
-        ctx_mask_left = ctx_mask[:, :pred_idx, :]
-        ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
-        ctx_mask_right = ctx_mask[:, pred_idx:, :]
-        ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, (H+1)W)
+        if ctx_mask is not None:
+            ctx_mask_left = ctx_mask[:, :pred_idx, :]
+            ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
+            ctx_mask_right = ctx_mask[:, pred_idx:, :]
+            ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, (H+1)W)
 
         # --- spatial attn masks ---
         valid_hw = torch.ones(B, T, (H+1)*W, dtype=torch.bool, device=self.device)  # (B, T, (H+1)W)
@@ -416,9 +415,9 @@ class WorldMAR(pl.LightningModule):
             # and padding_mask[:, t] = 0 if the frame at timestep t is padding)
             valid_hw &= padding_mask.unsqueeze(-1)  # (B, T, (H+1)W)
 
-        if self.training:
+        if self.training and ctx_mask is not None:
             # mask random tokens of previous non-memory context frames (i.e. set to 0)
-            valid_hw[:, -P:, :] = ~ctx_mask  # (B, T, (H+1)W)
+            valid_hw[:, :P, :] = ~ctx_mask  # (B, T, (H+1)W)
 
         # construct the decoder spatial attention mask
         # --------------------------------------------*
@@ -438,18 +437,18 @@ class WorldMAR(pl.LightningModule):
         s_attn_mask_enc = rearrange(s_attn_mask_enc, "b t hw1 hw2 -> (b t) 1 hw1 hw2")
 
         # --- temporal attn mask ---
-        valid_t = torch.ones(B, (H+1)*W, T, dtype=torch.bool, device=self.device)    # (B, (H+1)W, T)
+        valid_t = torch.ones(B, (H+1)*W, T, dtype=torch.bool, device=self.device)          # (B, (H+1)W, T)
         _, L, _ = valid_t.shape
-        batch_idx = batch_idx.unsqueeze(1).expand(-1, L, P)                              # (B, L, P)
-        len_idx = torch.arange(L, device=valid_t.device).unsqueeze(0).expand(B, -1, P)   # (B, L, P)
-        time_idx = torch.arange(P, device=valid_t.device).unsqueeze(0).expand(B, L, -1)  # (B, L, P)
+        batch_idx = torch.arange(B, device=valid_t.device).view(B, 1, 1).expand(-1, P, L)  # (B, P, L)
+        time_idx = torch.arange(P, device=valid_t.device).view(1, P, 1).expand(B, -1, L)   # (B, P, L)
+        len_idx = torch.arange(L, device=valid_t.device).view(1, 1, L).expand(B, P, -1)    # (B, P, L)
 
         if padding_mask is not None:
             # mask out entire frames if they were added as padding (padding_mask is (B, T),
             # and padding_mask[:, t] = 0 if the frame at timestep t is padding)
             valid_t &= padding_mask.unsqueeze(-2)  # (B, (H+1)W, T)
 
-        if self.training:
+        if self.training and ctx_mask is not None:
             # mask random tokens of previous non-memory context frames (i.e. set to 0)
             valid_t[batch_idx[ctx_mask], len_idx[ctx_mask], time_idx[ctx_mask]] = False
 
@@ -459,7 +458,7 @@ class WorldMAR(pl.LightningModule):
 
         # construct the encoder temporal attention mask in a similar fashion
         # but prevent any masked tokens on the predicted frame from being seen
-        valid_t[:, :, pred_idx] = pred_mask.unsqueeze(-1)
+        valid_t[:, :, pred_idx] = ~pred_mask
         t_attn_mask_enc = valid_t.unsqueeze(-1) & valid_t.unsqueeze(2)
         t_attn_mask_enc = rearrange(t_attn_mask_enc, "b hw t1 t2 -> (b hw) 1 t1 t2")
 
@@ -477,7 +476,7 @@ class WorldMAR(pl.LightningModule):
         # generate masks for all frames in previous frame window
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
-        pred_mask, ctx_mask = self.random_masking(x, masking_rate=masking_rate)  # (B, HW), (B, P, HW)
+        pred_mask, ctx_mask = self.random_masking(x, masking_rate=masking_rate)  # (B, HW), (B, P-1, HW)
 
         # store for later logging (see MaskedImageLogger class)
         self._last_pred_mask = pred_mask.detach().cpu()
@@ -493,6 +492,8 @@ class WorldMAR(pl.LightningModule):
             padded_ctx_mask = rearrange(ctx_mask, "b t (h w) -> b t h w", t=P-1, h=H)                                                # (B, P-1, H, W)
             padded_ctx_mask = torch.cat([padded_ctx_mask, torch.zeros(B, P-1, 1, W, dtype=torch.bool, device=self.device)], dim=-2)  # (B, P-1, H+1, W)
             padded_ctx_mask = rearrange(padded_ctx_mask, "b t h w -> b t (h w)")                                                     # (B, P-1, (H+1)W)
+        else:
+            padded_ctx_mask = None
 
         # construct spatial and temporal attention masks for the encoder and decoder
         (s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(
@@ -500,7 +501,7 @@ class WorldMAR(pl.LightningModule):
         )
 
         z = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
-        z = self.forward_decoder(x, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        z = self.forward_decoder(z, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         return z_gt, z, pred_mask  # (B, T, H, W, D), (B, T, H, W, D), (B, HW)
 
     def forward(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None):

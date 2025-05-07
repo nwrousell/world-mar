@@ -12,7 +12,7 @@ model:
     num_mem_frames: 2
     num_prev_frames: 2
     patch_size: 2
-    token_embed_dim: 16
+    vae_embed_dim: 16
     vae_seq_h: 18
     vae_seq_w: 32
     st_embed_dim: 256
@@ -23,8 +23,7 @@ model:
     diffloss_w: 256
     diffloss_d: 3
     num_sampling_steps: '100'
-    diffusion_batch_mul=: ,
-    mask_random_frame: False
+    diffusion_batch_mul: 4
     prev_masking_rate: 0.5
     mask_ratio_min: 0.7
     proj_dropout: 0.1
@@ -35,11 +34,11 @@ model:
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule
   params:
-    dataset_dir: "data/old-minecraft-dataset/"
+    dataset_dir: "data/minecraft-7x/"
     batch_sz: 8
     memory_distance: 1000
     memory_size: 100
     train_split: 0.99 # 0.01 for val
     num_mem_frames: 2
     num_prev_frames: 2
-    
+    num_workers: 4
