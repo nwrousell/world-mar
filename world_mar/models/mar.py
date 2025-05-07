@@ -337,7 +337,7 @@ class WorldMAR(pl.LightningModule):
         assert x.shape == (B, T, H+1, W, D)
         return x  # (B, T, H+1, W, D)
 
-    def forward_encoder(self, x, num_ctx_frames, actions, poses, timestamps, s_attn_mask=None, t_attn_mask=None):
+    def forward_encoder(self, x, actions, poses, timestamps, s_attn_mask=None, t_attn_mask=None):
         # x:       (B, T, H, W, token_embed_dim)
         # actions: (B, 25)
         # poses:   (B, T, 40H, 40W, 6)
@@ -361,23 +361,22 @@ class WorldMAR(pl.LightningModule):
 
         return x  # (B, T, H+1, W, D)
 
-    def forward_decoder(self, x, actions, poses, timestamps, mask, offsets, s_attn_mask=None, t_attn_mask=None):
+    def forward_decoder(self, x, actions, poses, timestamps, mask, pred_idx=0, s_attn_mask=None, t_attn_mask=None):
         # x:       (B, T, H+1, W, D)
-        # mask:    (B, HW)
-        # offsets: (B)
+        # mask:    (B, (H+1)W)
         B, T, H, W, D = x.shape
         H -= 1  # encoder would have concatenated token buffer onto x's H dim
 
         # convert mask and offsets into separate space and time masks
-        s_mask = mask.view(B, 1, H+1, W)
-        t_mask = (torch.arange(T, device=self.device).unsqueeze(0) == offsets.unsqueeze(1)).view(B, T, 1, 1)
-        full_mask = s_mask & t_mask
+        s_mask = mask.view(B, 1, H+1, W)                                                   # (B, 1, H+1, W)
+        t_mask = (torch.arange(T, device=self.device) == pred_idx).view(1, T, 1, 1)        # (1, T, 1, 1)
+        full_mask = s_mask & t_mask                                                        # (B, T, H+1, W)
         x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                       # (B, T, H+1, W, D)
 
         # add pose and timestamp embeddings
         x = self.add_pose_and_timestamp_embeddings(x, poses, timestamps, is_decoder=True)  # (B, T, H+1, W, D)
 
-        # re-add [PRED], [ACTION], and [CTX] tokens to the token buffers
+        # re-add [PRED], and [ACTION] tokens to the token buffers
         x = self.add_pred_and_action_embeddings(x, actions, is_decoder=True)               # (B, T, H+1, W, D)
 
         # pass through each decoder spatio-temporal attention block
@@ -484,9 +483,9 @@ class WorldMAR(pl.LightningModule):
         padded_pred_mask = rearrange(padded_pred_mask, "b h w -> b (h w)")                                                      # (B, (H+1)W)
 
         if ctx_mask is not None:
-            padded_ctx_mask = rearrange(ctx_mask, "b p (h w) -> b p h w", p=P, h=H)                                                # (B, P, H, W)
-            padded_ctx_mask = torch.cat([padded_ctx_mask, torch.zeros(B, P, 1, W, dtype=torch.bool, device=self.device)], dim=-2)  # (B, P, H+1, W)
-            padded_ctx_mask = rearrange(padded_ctx_mask, "b h w -> b (h w)")                                                       # (B, (H+1)W)
+            padded_ctx_mask = rearrange(ctx_mask, "b t (h w) -> b t h w", t=P-1, h=H)                                                # (B, P-1, H, W)
+            padded_ctx_mask = torch.cat([padded_ctx_mask, torch.zeros(B, P-1, 1, W, dtype=torch.bool, device=self.device)], dim=-2)  # (B, P-1, H+1, W)
+            padded_ctx_mask = rearrange(padded_ctx_mask, "b t h w -> b t (h w)")                                                     # (B, P-1, (H+1)W)
 
         # 3) construct attn_masks
         (s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(
@@ -497,7 +496,7 @@ class WorldMAR(pl.LightningModule):
         x = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
 
         # 5) run decoder
-        z = self.forward_decoder(x, actions, poses, timestamps, padded_pred_mask, offsets, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        z = self.forward_decoder(x, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
         return z, pred_mask, offsets, x_gt
