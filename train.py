@@ -22,7 +22,7 @@ from world_mar.dataset.dataloader import MinecraftDataModule
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=10):
+    def __init__(self, log_every_n_steps=500):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -59,7 +59,7 @@ class ImageLogger(pl.Callback):
         trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
 
 class MaskedImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=10):
+    def __init__(self, log_every_n_steps=500):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 

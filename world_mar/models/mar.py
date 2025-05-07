@@ -242,7 +242,7 @@ class WorldMAR(pl.LightningModule):
         indices = torch.Tensor(np.array(indices)).to(self.device).long()  # (B, HW)
         return indices
 
-    def random_masking(self, x, masking_rate=None):
+    def random_masking(self, x, masking_rate=None, custom_orders=None):
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
         L = self.frame_seq_len
@@ -255,7 +255,7 @@ class WorldMAR(pl.LightningModule):
 
         # random mask for the frame to be predicted (by default, final frame at index 0)
         mask = torch.zeros((B, L), dtype=bool, device=x.device)  # (B, HW)
-        pred_orders = self.shuffled_token_indices(B)
+        pred_orders = self.shuffled_token_indices(B) if custom_orders is None else custom_orders
         pred_mask = torch.scatter(
             mask,
             dim=-1, 
@@ -464,20 +464,18 @@ class WorldMAR(pl.LightningModule):
 
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
-    def masked_encoder_decoder(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None, masking_rate=None):
+    def masked_encoder_decoder(self, x, actions, poses, timestamps, 
+                               pred_mask, ctx_mask, pred_idx=0, padding_mask=None):
         B = x.shape[0]
 
-        # patchify latents
-        x = rearrange(x, "b t s c -> (b t) s c")
-        x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
-        x = rearrange(x, "(b t) h w d -> b t h w d", b=B)
+        # cache gt latents
         z_gt = x.clone().detach()
 
         # generate masks for all frames in previous frame window
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
-        pred_mask, ctx_mask = self.random_masking(x, masking_rate=masking_rate)  # (B, HW), (B, P-1, HW)
 
+        # TODO: can we make this a gif for iterative sampling @tanish?
         # store for later logging (see MaskedImageLogger class)
         self._last_pred_mask = pred_mask.detach().cpu()
         self._last_ctx_mask = (ctx_mask.detach().cpu() if ctx_mask is not None else None)
@@ -502,14 +500,21 @@ class WorldMAR(pl.LightningModule):
 
         z = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
         z = self.forward_decoder(z, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
-        return z_gt, z, pred_mask  # (B, T, H, W, D), (B, T, H, W, D), (B, HW)
+        return z_gt, z # (B, T, H, W, D), (B, T, H, W, D)
 
     def forward(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None):
         # scale the input tensor x to a standard normal distribution
+        B = x.shape[0]
         x = x * self.scale_factor
+
+        # patchify latents
+        x = rearrange(x, "b t s c -> (b t) s c")
+        x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
+        x = rearrange(x, "(b t) h w d -> b t h w d", b=B)
         
         # pass through the main masked spatio-temporal attention mechanism
-        z_gt, z, pred_mask = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_idx, padding_mask)
+        pred_mask, ctx_mask = self.random_masking(x, masking_rate=None)  # (B, HW), (B, P-1, HW)
+        z_gt, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, pred_idx, padding_mask)
 
         # split into target frame + diffuse
         z_t = z[:, pred_idx, :, :, :]        # (B, H, W, D)
@@ -593,28 +598,54 @@ class WorldMAR(pl.LightningModule):
             }
         }
 
-    def sample(self, x, actions, poses, timestamps, batch_nframes, pred_idx=0):
+    def sample(self, x, actions, poses, timestamps, batch_nframes, num_iter=4, pred_idx=0):
         B, L = len(x), self.num_frames * self.frame_seq_len
 
         # scale the input tensor x to match a standard normal distribution
         x = x * self.scale_factor
 
+        # patchify latents
+        x = rearrange(x, "b t s c -> (b t) s c")
+        x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
+        x = rearrange(x, "(b t) h w d -> b t h w d", b=B)
+
         # construct padding mask
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
-        # pass through main encoder-decoder network to get the latent
-        z_gt, z, pred_mask = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_idx, padding_mask=padding_mask, masking_rate=1.0)
+        # gen init mask
+        orders = self.shuffled_token_indices(B)
+        pred_mask, ctx_mask = self.random_masking(x, masking_rate=1.0, custom_orders=orders) # NOTE: doing fixed ctx mask here for every iter
+        
+        for step in range(num_iter):
+            # get prediction with cur state of masks
+            _, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, pred_idx, padding_mask)
 
-        # grab tokens for [MASK] frame
-        z_masked = z[:, pred_idx, :, :, :]  # (B, H, W, D)
+            # decide on next masking rate, dictating which we actually predict here
+            # TODO: keeping this rn for sake of cool masking viz,
+            #       but we really oughta be sampling w/out masking prev
+            masking_rate = np.cos(math.pi / 2. * (step + 1) / num_iter)
+            next_pred_mask, _ = self.random_masking(x, masking_rate=masking_rate, custom_orders=orders)  # just use same ctx mask for viz sake
+            # what we're actually predicting now -- the exclusion of the next mask and cur mask
+            cur_pred_mask = torch.logical_xor(pred_mask, next_pred_mask)
 
-        # diffuse the latents on masked tokens
-        z_masked = z_masked + self.diffusion_pos_emb_learned
-        z_masked = rearrange(z_masked, "b h w d -> (b h w) d")
-        patch_preds = self.diffloss.sample_ddim(z_masked, cfg=1.0)                                       # (BHW, D)
-        patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)  # (B, HW, D)
-        x_pred = self.unpatchify(patch_preds)
+            # do preds 
+            z = z[:, pred_idx, :, :, :]
+            z = z + self.diffusion_pos_emb_learned
+            z = rearrange(z, "b h w d -> (b h w) d", b=B, h=self.seq_h, w=self.seq_w)
+            z_masked = z[cur_pred_mask.flatten()]
+            x_pred = self.diffloss.sample_ddim(z_masked)
+            # and stuff these into cur x
+            x_cur = rearrange(x[:,pred_idx,:,:,:], "b h w c -> (b h w) c")
+            x_cur[cur_pred_mask.flatten()] = x_pred
+            x[:,pred_idx,:,:,:] = rearrange(x_cur, "(b h w) c -> b h w c", b=B, h=self.seq_h, w=self.seq_w)
+
+            # update mask for next iter
+            pred_mask = next_pred_mask
+
+        x_pred = x[:,pred_idx,:,:,:]
+        x_pred = rearrange(x_pred, "b h w d -> b (h w) d")
+        x_pred = self.unpatchify(x_pred)
 
         # undo the scaling operation done to the input tensor (recover the original range of values)
         x_pred = x_pred / self.scale_factor
