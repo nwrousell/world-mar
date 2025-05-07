@@ -472,7 +472,7 @@ class WorldMAR(pl.LightningModule):
         x = rearrange(x, "b t s c -> (b t) s c")
         x = self.patchify(x) # (bt) h w d (different h and w bc of patchifying)
         x = rearrange(x, "(b t) h w d -> b t h w d", b=B)
-        x_gt = x.clone().detach()
+        z_gt = x.clone().detach()
 
         # generate masks for all frames in previous frame window
         B, T, H, W, D = x.shape
@@ -499,24 +499,21 @@ class WorldMAR(pl.LightningModule):
         z = self.forward_decoder(x, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
         # z : b t h w d
 
-        return z, pred_mask, offsets, x_gt
+        return z_gt, z, pred_mask
 
-    def forward(self, x, actions, poses, timestamps, padding_mask=None):
+    def forward(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None):
         b = x.shape[0]
 
         # scale the input tensor x to a standard normal distribution
         x = x * self.scale_factor
         
         # pass through the main masked spatio-temporal attention mechanism
-        z, mask, offsets, x_gt = self.masked_encoder_decoder(x, actions, poses, timestamps, padding_mask)
+        z_gt, z, pred_mask = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_idx, padding_mask)
 
         # split into target frame + diffuse
-        batch_idx = torch.arange(b, device=self.device)
-        z_t = z[batch_idx, offsets] # b h w d
-        xt_gt = x_gt[batch_idx, offsets] # b h w d
-
-        loss = self.forward_diffusion(z_t, xt_gt, mask)        
-
+        z_t = z[:, pred_idx, :, :, :] # b h w d
+        z_gt_t = z_gt[:, pred_idx, :, :, :] # b h w d
+        loss = self.forward_diffusion(z_t, z_gt_t, pred_mask)        
         return loss
 
     def training_step(self, batch, batch_idx):

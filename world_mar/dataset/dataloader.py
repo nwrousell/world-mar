@@ -457,7 +457,7 @@ class MinecraftDataModule(L.LightningDataModule):
         self.num_workers = num_workers
         dataset = MinecraftDataset(
             dataset_dir=dataset_dir,
-            memory_size=memory_size
+            memory_size=memory_size,
             memory_distance=memory_distance, prev_distance=prev_distance,
             num_mem_frames=num_mem_frames, num_prev_frames=num_prev_frames
         )
