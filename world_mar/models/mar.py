@@ -515,7 +515,7 @@ class WorldMAR(pl.LightningModule):
 
         # --- parse batch ---
         # assume the layout is [PRED_FRAME, PREV_FRAME, CTX_FRAMES ...]
-        frames = batch["frames"].to(self.device) # shape [B, T, H, W, C]
+        frames = batch["frames"].to(self.device) # shape [B, T, L, D]
         batch_nframes = batch["num_non_padding_frames"].to(self.device) # shape [B,]
         actions = batch["action"].to(self.device) # shape [B, 25]
         poses = batch["plucker"].to(self.device) # shape [B, T, H, W, 6]

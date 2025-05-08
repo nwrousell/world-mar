@@ -40,39 +40,41 @@ class ImageLogger(pl.Callback):
         timestamps    = batch["timestamps"].to(pl_module.device)[:num_to_sample]
         
         # sample latents
-        pred_latent = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
+        pred_latent = pl_module.sample(latents, actions, poses, timestamps, batch_nframes)  # n 576 16
 
         # convert latents to actual frames in pixel-space using Oasis VAE decoder
-        B, T, C, H, W = latents.shape
-        batched_input_latents = latents.reshape(B*T, C, H, W)               # (BT, C, H, W)
-        to_decode = torch.cat([batched_input_latents, pred_latent], dim=0)  # (B(T+1), C, H, W)
+        B, T, HW, D = latents.shape
+        to_decode = torch.cat([*latents.unbind(dim=1), pred_latent], dim=0)
 
         pl_module.vae.to("cuda")
         with torch.autocast(device_type="cuda", enabled=False):
-            decoded = (
-                ((pl_module.vae.decode(to_decode).clip(-1, 1) + 1) / 2) * 255
-            ).to(torch.uint8).chunk(chunks=T+1, dim=0)
+            decoded = pl_module.vae.decode(to_decode).clip(-1, 1)
+            decoded = ((decoded + 1) / 2 * 255).to(torch.uint8)  # (B(T+1), C, H_pix, W_pix)
         pl_module.vae.to("cpu")
 
-        *decoded_input_frames, decoded_pred_frame = decoded  # list of T (B, C, H, W), and (B, C, H, W)
-        *decoded_input_frames_masked, _ = [frame.clone() for frame in decoded]
+        decoded = rearrange(decoded, "(t b) c h w -> t b c h w", t=T+1, b=B)  # (T+1, B, C, H, W)
+        decoded_inputs = decoded[:T]                                          # (T, B, C, H, W)
+        decoded_inputs_masked = [frame.clone() for frame in decoded_inputs]   # (T, B, C, H, W)
+        decoded_pred = decoded[T]                                             # (B, C, H, W)
 
         # NOTE: the following should be done after pl_module.sample() to get the correct data
         # retrieve token masks and prediction index from forward pass
         pred_idx        = pl_module._last_pred_idx                                             # int
         pred_mask       = pl_module._last_pred_mask[:num_to_sample]                            # (B, H_patch*W_patch)
-        ctx_mask        = pl_module._last_ctx_mask[:num_to_sample]                             # (B, P-1, H_patch*W_patch)
         pred_mask_iters = [mask[:num_to_sample] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
         pred_iters      = [pred[:num_to_sample] for pred in pl_module._last_pred_iters]        # list of (B, H_patch*W_patch)
 
-        # construct mask going through entire previous nom-memory context frame window
-        ctx_mask_left = ctx_mask[:, :pred_idx, :]
-        ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
-        ctx_mask_right = ctx_mask[:, pred_idx:, :]
-        ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, H_patch*W_patch)
+        if pl_module._last_ctx_mask is not None:
+            ctx_mask = pl_module._last_ctx_mask[:num_to_sample]                                # (B, P-1, H_patch*W_patch)
+            ctx_mask_left = ctx_mask[:, :pred_idx, :]
+            ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
+            ctx_mask_right = ctx_mask[:, pred_idx:, :]
+            ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)     # (B, P, H_patch*W_patch)
+        else:
+            ctx_mask = None
 
         # compute pixel‐patch dims
-        B, C, H_pix, W_pix = decoded_pred_frame.shape
+        B, C, H_pix, W_pix = decoded_pred.shape
         latent_h, latent_w = pl_module.vae_seq_h, pl_module.vae_seq_w
         pix_per_lat_h = H_pix // latent_h
         pix_per_lat_w = W_pix // latent_w
@@ -91,29 +93,30 @@ class ImageLogger(pl.Callback):
                 x0 =   c   * p * pix_per_lat_w
                 x1 = (c+1) * p * pix_per_lat_w
                 # grey-out the whole patch
-                decoded_input_frames_masked[0][i,:, y0:y1, x0:x1] = 50  # ~25% grey
+                decoded_inputs_masked[0][i,:, y0:y1, x0:x1] = 191  # ~25% grey
 
         # white-out masked tokens on other previous non-memory context frames
-        P = ctx_mask.shape[1]
-        ctx_mask = ctx_mask.reshape(B, P, H_patch, W_patch)
-        for p_idx in range(P):
-            mask_p = ctx_mask[:, p_idx, :, :]  # (B, H_patch, W_patch)
-            decoded_idx = (len(decoded) - 1) - p_idx
-            for i in range(B):
-                rows, cols = mask_p[i].nonzero(as_tuple=True)
-                for r, c in zip(rows.tolist(), cols.tolist()):
-                    # lower-left and upper-right patch coners
-                    y0 =   r   * p * pix_per_lat_h
-                    y1 = (r+1) * p * pix_per_lat_h
-                    x0 =   c   * p * pix_per_lat_w
-                    x1 = (c+1) * p * pix_per_lat_w
-                    # white-out the whole patch
-                    decoded_input_frames_masked[decoded_idx][i, :, y0:y1, x0:x1] = 255
+        if ctx_mask is not None:
+            P = ctx_mask.shape[1]
+            ctx_mask = ctx_mask.reshape(B, P, H_patch, W_patch)
+            for p_idx in range(P):
+                mask_p = ctx_mask[:, p_idx, :, :]  # (B, H_patch, W_patch)
+                decoded_idx = (len(decoded) - 1) - p_idx
+                for i in range(B):
+                    rows, cols = mask_p[i].nonzero(as_tuple=True)
+                    for r, c in zip(rows.tolist(), cols.tolist()):
+                        # lower-left and upper-right patch coners
+                        y0 =   r   * p * pix_per_lat_h
+                        y1 = (r+1) * p * pix_per_lat_h
+                        x0 =   c   * p * pix_per_lat_w
+                        x1 = (c+1) * p * pix_per_lat_w
+                        # white-out the whole patch
+                        decoded_inputs_masked[decoded_idx][i, :, y0:y1, x0:x1] = 255
 
         # three strips attached along width (horizontally)
-        masked_strip = torch.cat([decoded_input_frames_masked], dim=-1)
-        gt_strip     = torch.cat([decoded_input_frames], dim=-1)
-        pred_strip   = torch.cat([torch.full_like(decoded_pred_frame, 255), decoded_pred_frame], dim=-1)
+        masked_strip = torch.cat(list(reversed(decoded_inputs_masked)), dim=-1)
+        gt_strip     = torch.cat(list(reversed(decoded_inputs)), dim=-1)
+        pred_strip   = torch.cat([*[torch.full_like(decoded_pred, 255) for _ in range(T-1)], decoded_pred], dim=-1)
 
         # stack the three strips along height (vertically)
         visualizations = torch.cat([masked_strip, gt_strip, pred_strip], dim=-2)
