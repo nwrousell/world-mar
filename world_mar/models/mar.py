@@ -50,7 +50,7 @@ class WorldMAR(pl.LightningModule):
         proj_dropout=0.1,
         attn_dropout=0.1,
         gradient_clip_val=1.0,
-        warmup_steps=20000, # TODO: change this depending on dataset size
+        warmup_steps=10000, # TODO: change this depending on dataset size
         **kwargs
     ):
         super().__init__()
@@ -517,7 +517,7 @@ class WorldMAR(pl.LightningModule):
         )
         cosine_sched = CosineAnnealingLR(
             optim,
-            T_max=self.warmup_steps * 50 - self.warmup_steps,
+            T_max=100_000,
             eta_min=0.0
         )
         scheduler = SequentialLR(
@@ -572,72 +572,3 @@ class WorldMAR(pl.LightningModule):
         x_pred = self.unpatchify(patch_preds) / self.scale_factor 
 
         return x_pred
-
-    # def sample_tokens(self, bsz, num_iter=64, labels=None, temperature=1.0, progress=False):
-
-    #     # init and sample generation orders
-    #     mask = torch.ones(bsz, self.seq_len).cuda()
-    #     tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
-    #     orders = self.sample_orders(bsz)
-
-    #     indices = list(range(num_iter))
-    #     if progress:
-    #         indices = tqdm(indices)
-    #     # generate latents
-    #     for step in indices:
-    #         cur_tokens = tokens.clone()
-
-    #         # class embedding and CFG
-    #         if labels is not None:
-    #             class_embedding = self.class_emb(labels)
-    #         else:
-    #             class_embedding = self.fake_latent.repeat(bsz, 1)
-    #         if not cfg == 1.0:
-    #             tokens = torch.cat([tokens, tokens], dim=0)
-    #             class_embedding = torch.cat([class_embedding, self.fake_latent.repeat(bsz, 1)], dim=0)
-    #             mask = torch.cat([mask, mask], dim=0)
-
-    #         # mae encoder
-    #         x = self.forward_mae_encoder(tokens, mask, class_embedding)
-
-    #         # mae decoder
-    #         z = self.forward_mae_decoder(x, mask)
-
-    #         # mask ratio for the next round, following MaskGIT and MAGE.
-    #         mask_ratio = np.cos(math.pi / 2. * (step + 1) / num_iter)
-    #         mask_len = torch.Tensor([np.floor(self.seq_len * mask_ratio)]).cuda()
-
-    #         # masks out at least one for the next iteration
-    #         mask_len = torch.maximum(torch.Tensor([1]).cuda(),
-    #                                  torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
-
-    #         # get masking for next iteration and locations to be predicted in this iteration
-    #         mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
-    #         if step >= num_iter - 1:
-    #             mask_to_pred = mask[:bsz].bool()
-    #         else:
-    #             mask_to_pred = torch.logical_xor(mask[:bsz].bool(), mask_next.bool())
-    #         mask = mask_next
-    #         if not cfg == 1.0:
-    #             mask_to_pred = torch.cat([mask_to_pred, mask_to_pred], dim=0)
-
-    #         # sample token latents for this step
-    #         z = z[mask_to_pred.nonzero(as_tuple=True)]
-    #         # cfg schedule follow Muse
-    #         if cfg_schedule == "linear":
-    #             cfg_iter = 1 + (cfg - 1) * (self.seq_len - mask_len[0]) / self.seq_len
-    #         elif cfg_schedule == "constant":
-    #             cfg_iter = cfg
-    #         else:
-    #             raise NotImplementedError
-    #         sampled_token_latent = self.diffloss.sample(z, temperature, cfg_iter)
-    #         if not cfg == 1.0:
-    #             sampled_token_latent, _ = sampled_token_latent.chunk(2, dim=0)  # Remove null class samples
-    #             mask_to_pred, _ = mask_to_pred.chunk(2, dim=0)
-
-    #         cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent
-    #         tokens = cur_tokens.clone()
-
-    #     # unpatchify
-    #     tokens = self.unpatchify(tokens)
-    #     return tokens
