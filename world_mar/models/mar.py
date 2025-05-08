@@ -546,10 +546,16 @@ class WorldMAR(pl.LightningModule):
 
         # --- construct padding_mask ---
         B, L = len(x), self.num_frames * self.frame_seq_len
-        x = x * self.scale_factor
         # assert not torch.any(batch_nframes > self.num_frames)
         idx = torch.arange(self.num_frames, device=self.device).expand(B, self.num_frames)
-        padding_mask = idx < batch_nframes.unsqueeze(1) # b t
+        # padding_mask = idx < batch_nframes.unsqueeze(1) # b t
+        padding_mask = None
+
+        print(x.dtype, x.max(), x.min())
+
+        x = x * self.scale_factor
+
+        print(x.dtype, x.max(), x.min())
 
         z, mask, offsets, x_gt = self._compute_z_and_mask(x, actions, poses, timestamps, padding_mask=padding_mask, masking_rate=1.0)
 
@@ -565,10 +571,11 @@ class WorldMAR(pl.LightningModule):
         # bc we're predicting on all masked at once, this is pretty simple
         start = time()
         patch_preds = self.diffloss.sample(z_mask) # (b h w) d
+        print(patch_preds.dtype, patch_preds.max(), patch_preds.min())
         print(f"max patch_pred {patch_preds.max().cpu().item()}")
         end = time()
         patch_preds = rearrange(patch_preds, "(b h w) d -> b (h w) d", b=B, h=self.seq_h, w=self.seq_w)
         # print("out:", patch_preds.shape, end - start)
-        x_pred = self.unpatchify(patch_preds) / self.scale_factor 
+        x_pred = self.unpatchify(patch_preds) / self.scale_factor
 
         return x_pred

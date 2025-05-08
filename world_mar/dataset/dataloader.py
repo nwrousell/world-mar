@@ -235,7 +235,7 @@ class MinecraftDataset(Dataset):
             counts_dict = json.load(f)
         self.total_frames = counts_dict["total_frames"]
         self.demo_to_num_frames = counts_dict["demonstration_id_to_num_frames"]
-        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))
+        self.unique_ids = sorted(list(self.demo_to_num_frames.keys()))[:5]
 
         # for demo in self.demo_to_num_frames.keys():
         #     self.demo_to_num_frames[demo] -= 1

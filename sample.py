@@ -44,7 +44,7 @@ def main(args):
     # save_image(sampled_frames[0], "ref.png")
 
     # get data
-    dataloader = MinecraftDataModule(dataset_dir=args.data_dir, batch_sz=1).val_dataloader()
+    dataloader = MinecraftDataModule(dataset_dir=args.data_dir, batch_sz=3).val_dataloader()
 
     batch = next(iter(dataloader))
     latents = batch["frames"].to(device)
@@ -53,13 +53,13 @@ def main(args):
     poses = batch["plucker"].to(device)
     timestamps = batch["timestamps"].to(device)
 
-    latents = format_image(latents).to(torch.float32)
+    print(latents.dtype, latents.max(), latents.min())
 
     # sample latent
     sampled_latents = model.sample(latents, actions, poses, timestamps, batch_nframes)
 
     # decode to frame
-    sampled_frames = model.vae.decode(sampled_latents) # 1, 3, 360, 640
+    sampled_frames = ((model.vae.decode(sampled_latents).clip(-1,1) + 1) / 2) * 255 # 1, 3, 360, 640
     print("sampled", sampled_frames.shape)
 
     # write to file
