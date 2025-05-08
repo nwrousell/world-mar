@@ -103,9 +103,9 @@ class ImageLogger(pl.Callback):
         captions = []
         for batch_idx in range(len(visualizations)):
             valid_ts = ts_raw[batch_idx][:bnf[batch_idx]]
-            ts_str = ", ".join(str(t) for t in reversed(valid_ts))
-            action_ix = max(range(len(ac[batch_idx])), key=lambda j: ac[batch_idx][j])
-            captions.append(f"step={global_step}  ts=[{ts_str}]  action={action_ix}")
+            ts_str = ",".join(str(t) for t in reversed(valid_ts))
+            ac_str = ",".join(str(a) for a in ac)
+            captions.append(f"step={global_step}  ts=[{ts_str}]  action=[{ac_str}]")
 
         # Log to wandb
         wandb_images = [wandb.Image(img, caption=caption) for img, caption in zip(visualizations, captions)]
