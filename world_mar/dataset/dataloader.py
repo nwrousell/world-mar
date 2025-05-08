@@ -390,12 +390,10 @@ class MinecraftDataset(Dataset):
         prev_frame_idx_shifts = self._compute_prev_idx_shifts()  # randomly chosen each sample
         candidate_ctx_indices = frame_idx + torch.cat([prev_frame_idx_shifts, mem_frame_idx_shifts])
 
-        # clean up context frame indices since samples from early in a video may not have many previous frames
-        candidate_ctx_indices = candidate_ctx_indices[candidate_ctx_indices >= 0]           # filter out frame indices that are negative
-        candidate_ctx_indices = candidate_ctx_indices[~is_gui_open[candidate_ctx_indices]]  # filter out frames where the GUI is open
-
-        if len(candidate_ctx_indices) == 0:
-            candidate_ctx_indices = torch.tensor([frame_idx - 1], dtype=torch.int64)
+        # filter out frame indices that are negative
+        candidate_ctx_indices = candidate_ctx_indices[candidate_ctx_indices >= 0] 
+        # filter out frames where the GUI is open, except for the previous frame
+        candidate_ctx_indices = candidate_ctx_indices[(candidate_ctx_indices == frame_idx - 1) | ~is_gui_open[candidate_ctx_indices]]  
 
         # retrieve final context frame indices using forced prev frames and overlap based memory frames
         retrieved_indices = get_most_relevant_poses_to_target(
@@ -407,6 +405,7 @@ class MinecraftDataset(Dataset):
             num_prev_frames=min(self.num_prev_frames, len(candidate_ctx_indices))
         )
         context_indices = candidate_ctx_indices[retrieved_indices[:len(candidate_ctx_indices)]].sort(descending=True)[0]
+        assert context_indices[0] == frame_idx - 1  # double-check that the previous frame is in the sample
 
         # concatenate the target frame and context frame indices
         frame_indices = torch.cat([torch.tensor([frame_idx]), context_indices])
