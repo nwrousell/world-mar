@@ -8,8 +8,8 @@ model:
         load_from_ckpt: checkpoints/oasis/vit-l-20.safetensors
     img_height: 360
     img_width: 640
-    num_frames: 5
-    num_mem_frames: 2
+    num_frames: 3
+    num_mem_frames: 1
     num_prev_frames: 2
     patch_size: 2
     vae_embed_dim: 16
@@ -36,9 +36,10 @@ dataloader:
   params:
     dataset_dir: "data/minecraft-7x/"
     batch_sz: 48
+    prev_distance: 1
     memory_distance: 1000
     memory_size: 100
     train_split: 0.99 # 0.01 for val
-    num_mem_frames: 2
-    num_prev_frames: 2
+    num_mem_frames: 1
+    num_prev_frames: 1
     num_workers: 8

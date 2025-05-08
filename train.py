@@ -35,7 +35,7 @@ class ImageLogger(pl.Callback):
         timestamps    = batch["timestamps"].to(pl_module.device)[:self.B]
         
         # sample latents
-        pred_latent = pl_module.sample(latents, actions, poses, timestamps, batch_nframes)  # n 576 16
+        pred_latent = pl_module.sample(latents, actions, poses, timestamps, batch_nframes, prev_masking=True)  # n 576 16
 
         # convert latents to actual frames in pixel-space using Oasis VAE decoder
         B, T, HW, D = latents.shape
