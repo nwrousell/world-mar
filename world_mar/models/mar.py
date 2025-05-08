@@ -36,10 +36,10 @@ class WorldMAR(pl.LightningModule):
 
     """
     def __init__(
-        self, 
+        self,
         vae_config=None, # should be an AutoencoderKL 
         img_height=360, img_width=640, num_frames=5,
-        num_mem_frames=2, num_prev_frames=3,
+        num_mem_frames=2, num_prev_frames=3,  # NOTE: num_prev_frames here is 1 more than in dataloader because of the target frame
         patch_size=2, vae_embed_dim=16,
         vae_seq_h=18, vae_seq_w=32,
         st_embed_dim=256,
@@ -284,7 +284,7 @@ class WorldMAR(pl.LightningModule):
 
         return pred_mask, ctx_masks  # (B, HW), (B, P-1, HW)
 
-    def add_pose_action_timestamp_embeddings(self, x, poses, timestamps, actions, is_decoder=False):
+    def add_pose_action_timestamp_embeddings(self, x, poses, timestamps, actions, batch_nframes, is_decoder=False):
         B, T, H, W, D = x.shape
         
         if is_decoder:
@@ -304,15 +304,19 @@ class WorldMAR(pl.LightningModule):
         timestamp_embeddings = rearrange(timestamp_embeddings, "(b t) d -> b t d", b=B)  # (B, T, D)
         timestamp_embeddings = timestamp_embeddings.view(B, T, 1, 1, D)                  # (B, T, 1, 1, D)
         timestamp_embeddings = timestamp_embeddings.expand(-1, -1, H, W, -1)             # (B, T, H, W, D)
-        assert timestamp_embeddings.shape == (B, T, H, W, D)
+        # zero out timestamp embeddings for padding frames
+        frame_idx = torch.arange(T, device=x.device).view(1, T, 1, 1, 1)                 # (1, T, 1, 1, 1)
+        valid = frame_idx < batch_nframes.view(B, 1, 1, 1, 1)                            # (B, T, 1, 1, 1)
+        timestamp_embeddings *= valid
+        assert timestamp_embeddings.shape == (B, T, H, W, D)                             # (B, T, H, W, D)
 
         # construct action embeddings matching latent shape
         action_embeddings = self.action_embedder(actions)                   # (B, D)
         action_embeddings = rearrange(action_embeddings, 'b d -> b 1 1 d')  # add singleton dims for H and W
 
         # return the latent with the embeddings added
-        x[:, 0, :H, :, :] = x[:, 0, :H, :, :] + action_embeddings  # only final pred frame gets action embeddings
-        x[:, :, :H, :, :] = x[:, :, :H, :, :] + pose_embeddings + timestamp_embeddings   
+        x[:, 0, :H, :, :] += action_embeddings  # only final pred frame gets action embeddings
+        x[:, :, :H, :, :] += pose_embeddings + timestamp_embeddings   
 
         return x  # (B, T, H or H+1, W, D)
 
@@ -329,30 +333,30 @@ class WorldMAR(pl.LightningModule):
         assert x.shape == (B, T, H+1, W, D)
         return x  # (B, T, H+1, W, D)
 
-    def forward_encoder(self, x, actions, poses, timestamps, s_attn_mask=None, t_attn_mask=None):
+    def forward_encoder(self, x, actions, poses, timestamps, batch_nframes, s_attn_mask=None, t_attn_mask=None):
         # x:       (B, T, H, W, token_embed_dim)
         # actions: (B, 25)
         # poses:   (B, T, 40H, 40W, 6)
 
         # project and layer normalize
-        x = self.z_proj(x)                                                            # (B, T, H, W, D)
+        x = self.z_proj(x)  # (B, T, H, W, D)
 
         # add pose and timestamp embeddings
-        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions)  # (B, T, H, W, D)
+        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions, batch_nframes)  # (B, T, H, W, D)
 
         # add token buffers for prediction and context (on memory frames)
-        x = self.add_buffer_tokens(x)                                                 # (B, T, H+1, W, D)
+        x = self.add_buffer_tokens(x)  # (B, T, H+1, W, D)
 
         # pass through each encoder spatio-temporal attention block
         for block in self.encoder_blocks:
-            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)            # (B, T, H+1, W, D)
+            x = block(x, s_attn_mask=s_attn_mask, t_attn_mask=t_attn_mask)  # (B, T, H+1, W, D)
         
         # final layer norm before passing to the decoder
-        x = self.encoder_norm(x)                                                      # (B, T, H+1, W, D)
+        x = self.encoder_norm(x)  # (B, T, H+1, W, D)
 
         return x  # (B, T, H+1, W, D)
 
-    def forward_decoder(self, x, actions, poses, timestamps, mask, pred_idx=0, s_attn_mask=None, t_attn_mask=None):
+    def forward_decoder(self, x, actions, poses, timestamps, mask, batch_nframes, pred_idx=0, s_attn_mask=None, t_attn_mask=None):
         # x:       (B, T, H+1, W, D)
         # mask:    (B, (H+1)W)
         B, T, H, W, D = x.shape
@@ -367,7 +371,7 @@ class WorldMAR(pl.LightningModule):
         x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                 # (B, T, H+1, W, D)
 
         # add pose and timestamp embeddings
-        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions, is_decoder=True)  # (B, T, H+1, W, D)
+        x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions, batch_nframes, is_decoder=True)  # (B, T, H+1, W, D)
 
         # pass through each decoder spatio-temporal attention block
         for block in self.decoder_blocks:
@@ -457,7 +461,8 @@ class WorldMAR(pl.LightningModule):
         return s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec
 
     def masked_encoder_decoder(self, x, actions, poses, timestamps, 
-                               pred_mask, ctx_mask, pred_idx=0, padding_mask=None):
+                               pred_mask, ctx_mask, batch_nframes, 
+                               pred_idx=0, padding_mask=None):
         B = x.shape[0]
 
         # cache gt latents
@@ -484,11 +489,17 @@ class WorldMAR(pl.LightningModule):
             x, padded_pred_mask, pred_idx=pred_idx, ctx_mask=padded_ctx_mask, padding_mask=padding_mask
         )
 
-        z = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
-        z = self.forward_decoder(z, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
+        z = self.forward_encoder(
+            x, actions, poses, timestamps, batch_nframes, 
+            s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc
+        )
+        z = self.forward_decoder(
+            z, actions, poses, timestamps, padded_pred_mask, batch_nframes, 
+            pred_idx=pred_idx, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec
+        )
         return z_gt, z  # (B, T, H, W, D), (B, T, H, W, D)
 
-    def forward(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None):
+    def forward(self, x, actions, poses, timestamps, batch_nframes, pred_idx=0, padding_mask=None):
         # scale the input tensor x to a standard normal distribution
         B = x.shape[0]
         x = x * self.scale_factor
@@ -528,7 +539,7 @@ class WorldMAR(pl.LightningModule):
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
         # --- forward + backprop ---
-        loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
+        loss = self(frames, actions, poses, timestamps, batch_nframes, padding_mask=padding_mask)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         # --- clip gradients, backwards, step
@@ -553,7 +564,7 @@ class WorldMAR(pl.LightningModule):
         padding_mask = idx < batch_nframes.unsqueeze(1) # b t
 
         # --- forward + backprop ---
-        loss = self(frames, actions, poses, timestamps, padding_mask=padding_mask)
+        loss = self(frames, actions, poses, timestamps, batch_nframes, padding_mask=padding_mask)
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
     def configure_optimizers(self):

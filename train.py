@@ -122,6 +122,24 @@ class ImageLogger(pl.Callback):
         # create a GIF of the predicted frame through each MAR sampling iteration
         wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
         trainer.logger.experiment.log({"mar_sampling_gifs": wandb_gifs}, step=global_step)
+
+        # build masked timestamp rows: keep only idx < batch_nframes[b], else None
+        bnf = batch_nframes.detach().cpu().tolist()
+        ts_raw = timestamps.detach().cpu().tolist()
+        ac = actions.detach().cpu().tolist()
+
+        ts_masked = []
+        for row_ts, valid in zip(ts_raw, bnf):
+            ts_masked.append([row_ts[i] if i < valid else None for i in range(len(row_ts))])
+
+        # column names still T columns, W&B will render None as blank
+        ts_cols = [f"timestamp_{i}" for i in range(len(ts_masked[0]))]
+        ac_cols = [f"action_dim_{i}" for i in range(len(ac[0]))]
+
+        trainer.logger.experiment.log({
+            "timestamps": wandb.Table(data=ts_masked, columns=ts_cols),
+            "actions": wandb.Table(data=ac, columns=ac_cols),
+        }, step=global_step)
     
     def mar_sampling_gifs(self, pl_module, pred_mask_iters, pred_iters):
         device = pl_module.device
