@@ -307,7 +307,7 @@ class WorldMAR(pl.LightningModule):
         # zero out timestamp embeddings for padding frames
         frame_idx = torch.arange(T, device=x.device).view(1, T, 1, 1, 1)                 # (1, T, 1, 1, 1)
         valid = frame_idx < batch_nframes.view(B, 1, 1, 1, 1)                            # (B, T, 1, 1, 1)
-        timestamp_embeddings *= valid
+        timestamp_embeddings = timestamp_embeddings * valid
         assert timestamp_embeddings.shape == (B, T, H, W, D)                             # (B, T, H, W, D)
 
         # construct action embeddings matching latent shape
