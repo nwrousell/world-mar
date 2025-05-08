@@ -358,10 +358,12 @@ class WorldMAR(pl.LightningModule):
         B, T, H, W, D = x.shape
         H -= 1  # encoder would have concatenated token buffer onto x's H dim
 
-        # convert mask and offsets into separate space and time masks
+        # when intersected, t_mask selects the predicted frame, and s_mask selects the tokens within that frame
         s_mask = mask.view(B, 1, H+1, W)                                             # (B, 1, H+1, W)
         t_mask = (torch.arange(T, device=self.device) == pred_idx).view(1, T, 1, 1)  # (1, T, 1, 1)
         full_mask = s_mask & t_mask                                                  # (B, T, H+1, W)
+
+        # replace ground-truth latent tokens with [MASK] tokens based on full_mask
         x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                 # (B, T, H+1, W, D)
 
         # add pose and timestamp embeddings
@@ -465,12 +467,6 @@ class WorldMAR(pl.LightningModule):
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
 
-        # TODO: can we make this a gif for iterative sampling @tanish?
-        # store for later logging (see MaskedImageLogger class)
-        self._last_pred_mask = pred_mask.detach().cpu()
-        self._last_ctx_mask = (ctx_mask.detach().cpu() if ctx_mask is not None else None)
-        self._last_pred_idx = pred_idx
-
         # add padding along the H dimension (since we concat token buffers for the encoder-decoder to use)
         padded_pred_mask = rearrange(pred_mask, "b (h w) -> b h w", h=H)                                                        # (B, H, W)
         padded_pred_mask = torch.cat([padded_pred_mask, torch.zeros((B, 1, W), dtype=torch.bool, device=self.device)], dim=-2)  # (B, H+1, W)
@@ -490,7 +486,7 @@ class WorldMAR(pl.LightningModule):
 
         z = self.forward_encoder(x, actions, poses, timestamps, s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc)
         z = self.forward_decoder(z, actions, poses, timestamps, padded_pred_mask, s_attn_mask=s_attn_mask_dec, t_attn_mask=t_attn_mask_dec)
-        return z_gt, z # (B, T, H, W, D), (B, T, H, W, D)
+        return z_gt, z  # (B, T, H, W, D), (B, T, H, W, D)
 
     def forward(self, x, actions, poses, timestamps, pred_idx=0, padding_mask=None):
         # scale the input tensor x to a standard normal distribution
@@ -588,7 +584,7 @@ class WorldMAR(pl.LightningModule):
             }
         }
 
-    def sample(self, x, actions, poses, timestamps, batch_nframes, num_iter=4, pred_idx=0, prev_masking=False):
+    def sample(self, x, actions, poses, timestamps, batch_nframes, num_mar_iters=4, pred_idx=0, prev_masking=False):
         B, L = len(x), self.num_frames * self.frame_seq_len
 
         # scale the input tensor x to match a standard normal distribution
@@ -605,17 +601,22 @@ class WorldMAR(pl.LightningModule):
 
         # gen init mask
         orders = self.shuffled_token_indices(B)
-        pred_mask, ctx_mask = self.random_masking(x, masking_rate=1.0, custom_orders=orders, prev_masking=prev_masking) # NOTE: doing fixed ctx mask here for every iter
+        pred_mask, ctx_mask = self.random_masking(x, masking_rate=1.0, custom_orders=orders, prev_masking=prev_masking)
+
+        # store for later logging (see MaskedImageLogger class)
+        self._last_pred_idx = pred_idx
+        self._last_pred_mask = pred_mask.detach().cpu()
+        self._last_ctx_mask = (ctx_mask.detach().cpu() if ctx_mask is not None else None)
+        self._last_pred_masks_iters = []
+        self._last_pred_iters = []
         
-        for step in range(num_iter):
+        for step in range(num_mar_iters):
             # get prediction with cur state of masks
             _, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, pred_idx, padding_mask)
 
             # decide on next masking rate, dictating which we actually predict here
-            # TODO: keeping this rn for sake of cool masking viz,
-            #       but we really oughta be sampling w/out masking prev
-            masking_rate = np.cos(math.pi / 2. * (step + 1) / num_iter)
-            next_pred_mask, _ = self.random_masking(x, masking_rate=masking_rate, custom_orders=orders, prev_masking=prev_masking)  # just use same ctx mask for viz sake
+            masking_rate = np.cos(math.pi / 2. * (step + 1) / num_mar_iters)
+            next_pred_mask, _ = self.random_masking(x, masking_rate=masking_rate, custom_orders=orders, prev_masking=prev_masking)
             # what we're actually predicting now -- the exclusion of the next mask and cur mask
             cur_pred_mask = torch.logical_xor(pred_mask, next_pred_mask)
 
@@ -629,6 +630,10 @@ class WorldMAR(pl.LightningModule):
             x_cur = rearrange(x[:,pred_idx,:,:,:], "b h w c -> (b h w) c")
             x_cur[cur_pred_mask.flatten()] = x_pred
             x[:,pred_idx,:,:,:] = rearrange(x_cur, "(b h w) c -> b h w c", b=B, h=self.seq_h, w=self.seq_w)
+
+            # save current mask and prediction for visualization
+            self._last_pred_masks_iters.append(cur_pred_mask.detach().cpu())
+            self._last_pred_iters.append(x[:,pred_idx,:,:,:].detach().cpu())
 
             # update mask for next iter
             pred_mask = next_pred_mask

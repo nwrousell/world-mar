@@ -33,76 +33,46 @@ class ImageLogger(pl.Callback):
             return
         
         num_to_sample = 4
-        latents = batch["frames"].to(pl_module.device)[:num_to_sample]
+        latents       = batch["frames"].to(pl_module.device)[:num_to_sample]
         batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:num_to_sample]
-        actions = batch["action"].to(pl_module.device)[:num_to_sample]
-        poses = batch["plucker"].to(pl_module.device)[:num_to_sample]
-        timestamps = batch["timestamps"].to(pl_module.device)[:num_to_sample]
+        actions       = batch["action"].to(pl_module.device)[:num_to_sample]
+        poses         = batch["plucker"].to(pl_module.device)[:num_to_sample]
+        timestamps    = batch["timestamps"].to(pl_module.device)[:num_to_sample]
         
         # sample latents
-        sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
+        pred_latent = pl_module.sample(latents, actions, poses, timestamps, batch_nframes) # n 576 16
 
-        # decode to frames
-        to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
+        # convert latents to actual frames in pixel-space using Oasis VAE decoder
+        B, T, C, H, W = latents.shape
+        batched_input_latents = latents.reshape(B*T, C, H, W)               # (BT, C, H, W)
+        to_decode = torch.cat([batched_input_latents, pred_latent], dim=0)  # (B(T+1), C, H, W)
+
         pl_module.vae.to("cuda")
         with torch.autocast(device_type="cuda", enabled=False):
-            one, two, three, four, five = (
+            decoded = (
                 ((pl_module.vae.decode(to_decode).clip(-1, 1) + 1) / 2) * 255
-            ).to(torch.uint8).chunk(chunks=5, dim=0)
+            ).to(torch.uint8).chunk(chunks=T+1, dim=0)
         pl_module.vae.to("cpu")
 
-        trifolds = torch.cat([one, two, three, four, five], dim=-1) # concat along width dim
+        *decoded_input_frames, decoded_pred_frame = decoded  # list of T (B, C, H, W), and (B, C, H, W)
+        *decoded_input_frames_masked, _ = [frame.clone() for frame in decoded]
 
-        wandb_images = [wandb.Image(img) for img in trifolds]
-
-        # Log to W&B
-        trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
-
-class MaskedImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=10):
-        super().__init__()
-        self.log_every_n_steps = log_every_n_steps
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        global_step = trainer.global_step
-
-        if global_step % self.log_every_n_steps != 0:
-            return
-
-        num_to_sample = 4
-        device        = pl_module.device
-        latents       = batch["frames"].to(device)[:num_to_sample]
-        batch_nframes = batch["num_non_padding_frames"].to(device)[:num_to_sample]
-        actions       = batch["action"].to(device)[:num_to_sample]
-        poses         = batch["plucker"].to(device)[:num_to_sample]
-        timestamps    = batch["timestamps"].to(device)[:num_to_sample]
-
-        # sample latents
-        sampled_latents = pl_module.sample(latents, actions, poses, timestamps, batch_nframes, prev_masking=True)
-
-        # decode to frames
-        to_decode = torch.cat([latents[:, 3], latents[:, 2], latents[:, 1], latents[:, 0], sampled_latents], dim=0)
-        pl_module.vae.to("cuda")
-        with torch.autocast(device_type="cuda", enabled=False):
-            one, two, three, four, five = (
-                ((pl_module.vae.decode(to_decode).clip(-1, 1) + 1) / 2) * 255
-            ).to(torch.uint8).chunk(chunks=5, dim=0)
-        pl_module.vae.to("cpu")
-
+        # NOTE: the following should be done after pl_module.sample() to get the correct data
         # retrieve token masks and prediction index from forward pass
-        pred_mask = pl_module._last_pred_mask[:num_to_sample]  # (B, H_patch*W_patch)
-        ctx_mask = pl_module._last_ctx_mask[:num_to_sample]    # (B, P-1, H_patch*W_patch)
-        pred_idx = pl_module._last_pred_idx                    # int
+        pred_idx        = pl_module._last_pred_idx                                             # int
+        pred_mask       = pl_module._last_pred_mask[:num_to_sample]                            # (B, H_patch*W_patch)
+        ctx_mask        = pl_module._last_ctx_mask[:num_to_sample]                             # (B, P-1, H_patch*W_patch)
+        pred_mask_iters = [mask[:num_to_sample] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
+        pred_iters      = [pred[:num_to_sample] for pred in pl_module._last_pred_iters]        # list of (B, H_patch*W_patch)
 
         # construct mask going through entire previous nom-memory context frame window
         ctx_mask_left = ctx_mask[:, :pred_idx, :]
         ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
         ctx_mask_right = ctx_mask[:, pred_idx:, :]
-        # print(ctx_mask_left.shape, ctx_mask_middle.shape, ctx_mask_right.shape)
         ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, H_patch*W_patch)
 
         # compute pixel‐patch dims
-        B, C, H_pix, W_pix = five.shape
+        B, C, H_pix, W_pix = decoded_pred_frame.shape
         latent_h, latent_w = pl_module.vae_seq_h, pl_module.vae_seq_w
         pix_per_lat_h = H_pix // latent_h
         pix_per_lat_w = W_pix // latent_w
@@ -110,8 +80,7 @@ class MaskedImageLogger(pl.Callback):
         H_patch = latent_h // p
         W_patch = latent_w // p
 
-        # white-out masked tokens on pred frame
-        decoded = [one, two, three, four, five]
+        # grey-out masked tokens on pred frame
         pred_mask = pred_mask.reshape(B, H_patch, W_patch)
         for i in range(B):
             rows, cols = pred_mask[i].nonzero(as_tuple=True)
@@ -121,10 +90,10 @@ class MaskedImageLogger(pl.Callback):
                 y1 = (r+1) * p * pix_per_lat_h
                 x0 =   c   * p * pix_per_lat_w
                 x1 = (c+1) * p * pix_per_lat_w
-                # whiteout the whole patch
-                five[i,:, y0:y1, x0:x1] = 255
+                # grey-out the whole patch
+                decoded_input_frames_masked[0][i,:, y0:y1, x0:x1] = 50  # ~25% grey
 
-        # black-out masked tokens on other previous non-memory context frames
+        # white-out masked tokens on other previous non-memory context frames
         P = ctx_mask.shape[1]
         ctx_mask = ctx_mask.reshape(B, P, H_patch, W_patch)
         for p_idx in range(P):
@@ -138,13 +107,20 @@ class MaskedImageLogger(pl.Callback):
                     y1 = (r+1) * p * pix_per_lat_h
                     x0 =   c   * p * pix_per_lat_w
                     x1 = (c+1) * p * pix_per_lat_w
-                    # blackout the whole patch
-                    decoded[decoded_idx][i, :, y0:y1, x0:x1] = 0
+                    # white-out the whole patch
+                    decoded_input_frames_masked[decoded_idx][i, :, y0:y1, x0:x1] = 255
 
-        # log to wandb
-        trifolds_masked = torch.cat([one, two, three, four, five], dim=-1)
-        wandb_imgs = [wandb.Image(img) for img in trifolds_masked]
-        trainer.logger.experiment.log({"generated_images_masked": wandb_imgs}, step=global_step)
+        # three strips attached along width (horizontally)
+        masked_strip = torch.cat([decoded_input_frames_masked], dim=-1)
+        gt_strip     = torch.cat([decoded_input_frames], dim=-1)
+        pred_strip   = torch.cat([torch.full_like(decoded_pred_frame, 255), decoded_pred_frame], dim=-1)
+
+        # stack the three strips along height (vertically)
+        visualizations = torch.cat([masked_strip, gt_strip, pred_strip], dim=-2)
+
+        # Log to wandb
+        wandb_images = [wandb.Image(img) for img in visualizations]
+        trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
 
 def get_callbacks(logdir):
     return [
@@ -156,7 +132,6 @@ def get_callbacks(logdir):
             mode="min"
         ),
         ImageLogger(),
-        MaskedImageLogger(),
         LearningRateMonitor(logging_interval='step')
     ]
 
