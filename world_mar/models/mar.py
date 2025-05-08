@@ -484,11 +484,10 @@ class WorldMAR(pl.LightningModule):
         else:
             padded_ctx_mask = None
 
-        # construct spatial and temporal attention masks for the encoder and decoder
+        # construct spatial and temporal attention masks and pass through encoder and decoder
         (s_attn_mask_enc, t_attn_mask_enc, s_attn_mask_dec, t_attn_mask_dec) = self.construct_attn_masks(
             x, padded_pred_mask, pred_idx=pred_idx, ctx_mask=padded_ctx_mask, padding_mask=padding_mask
         )
-
         z = self.forward_encoder(
             x, actions, poses, timestamps, batch_nframes, 
             s_attn_mask=s_attn_mask_enc, t_attn_mask=t_attn_mask_enc
@@ -511,7 +510,7 @@ class WorldMAR(pl.LightningModule):
         
         # pass through the main masked spatio-temporal attention mechanism
         pred_mask, ctx_mask = self.random_masking(x, masking_rate=None)  # (B, HW), (B, P-1, HW)
-        z_gt, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, pred_idx, padding_mask)
+        z_gt, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, batch_nframes, pred_idx, padding_mask)
 
         # split into target frame + diffuse
         z_t = z[:, pred_idx, :, :, :]        # (B, H, W, D)
@@ -623,7 +622,7 @@ class WorldMAR(pl.LightningModule):
         
         for step in range(num_mar_iters):
             # get prediction with cur state of masks
-            _, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, pred_idx, padding_mask)
+            _, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, batch_nframes, pred_idx, padding_mask)
 
             # decide on next masking rate, dictating which we actually predict here
             masking_rate = np.cos(math.pi / 2. * (step + 1) / num_mar_iters)
