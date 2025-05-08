@@ -574,14 +574,14 @@ class WorldMAR(pl.LightningModule):
             end_factor=1.0,
             total_iters=self.warmup_steps
         )
-        cosine_sched = CosineAnnealingLR(
-            optim,
-            T_max=self.warmup_steps * 5, # warmup steps ~ batches / epoch
-            eta_min=0.0
-        )
+        # cosine_sched = CosineAnnealingLR(
+        #     optim,
+        #     T_max=self.warmup_steps * 5, # warmup steps ~ batches / epoch
+        #     eta_min=0.0
+        # )
         scheduler = SequentialLR(
             optim,
-            schedulers=[warmup_sched, cosine_sched],
+            schedulers=[warmup_sched],
             milestones=[self.warmup_steps]
         )
 

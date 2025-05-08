@@ -1,5 +1,5 @@
 model:
-  learning_rate: 8e-4 # from MAR for img gen paper
+  learning_rate: 5e-5
   target: world_mar.models.mar.WorldMAR
   params:
     vae_config:

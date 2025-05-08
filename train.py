@@ -16,7 +16,7 @@ from world_mar.modules.utils import instantiate_from_config
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=500):
+    def __init__(self, log_every_n_steps=1000):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -78,8 +78,8 @@ class ImageLogger(pl.Callback):
 
         # grey-out masked tokens on pred frame
         pred_mask = pred_mask.reshape(B, H_patch, W_patch)
-        for i in range(B):
-            rows, cols = pred_mask[i].nonzero(as_tuple=True)
+        for batch_idx in range(B):
+            rows, cols = pred_mask[batch_idx].nonzero(as_tuple=True)
             for r, c in zip(rows.tolist(), cols.tolist()):
                 # lower-left and upper-right patch corners
                 y0 =   r   * p * pix_per_lat_h
@@ -87,7 +87,7 @@ class ImageLogger(pl.Callback):
                 x0 =   c   * p * pix_per_lat_w
                 x1 = (c+1) * p * pix_per_lat_w
                 # grey-out the whole patch
-                decoded_inputs_masked[0][i,:, y0:y1, x0:x1] = 230  # ~10% grey
+                decoded_inputs_masked[0][batch_idx,:, y0:y1, x0:x1] = 230  # ~10% grey
 
         # white-out masked tokens on other previous non-memory context frames
         if ctx_mask is not None:
@@ -96,8 +96,8 @@ class ImageLogger(pl.Callback):
             for p_idx in range(P):
                 mask_p = ctx_mask[:, p_idx, :, :]  # (B, H_patch, W_patch)
                 decoded_idx = (len(decoded) - 1) - p_idx
-                for i in range(B):
-                    rows, cols = mask_p[i].nonzero(as_tuple=True)
+                for batch_idx in range(B):
+                    rows, cols = mask_p[batch_idx].nonzero(as_tuple=True)
                     for r, c in zip(rows.tolist(), cols.tolist()):
                         # lower-left and upper-right patch coners
                         y0 =   r   * p * pix_per_lat_h
@@ -105,7 +105,7 @@ class ImageLogger(pl.Callback):
                         x0 =   c   * p * pix_per_lat_w
                         x1 = (c+1) * p * pix_per_lat_w
                         # white-out the whole patch
-                        decoded_inputs_masked[decoded_idx][i, :, y0:y1, x0:x1] = 255
+                        decoded_inputs_masked[decoded_idx][batch_idx, :, y0:y1, x0:x1] = 255
 
         # three strips attached along width (horizontally)
         masked_strip = torch.cat(list(reversed(decoded_inputs_masked)), dim=-1)
@@ -115,31 +115,28 @@ class ImageLogger(pl.Callback):
         # stack the three strips along height (vertically)
         visualizations = torch.cat([masked_strip, gt_strip, pred_strip], dim=-2)
 
+        # build per‐sample image captions
+        bnf = batch_nframes.detach().cpu().tolist()
+        ts_raw = timestamps.detach().cpu().tolist()
+        ac = actions.detach().cpu().tolist()
+
+        captions = []
+        for batch_idx in range(len(visualizations)):
+            valid_ts = ts_raw[batch_idx][:bnf[batch_idx]]
+            ts_str = ", ".join(str(t) for t in reversed(valid_ts))
+            action_ix = max(range(len(ac[batch_idx])), key=lambda j: ac[batch_idx][j])
+            captions.append(f"step={global_step}  ts=[{ts_str}]  action={action_ix}")
+
         # Log to wandb
-        wandb_images = [wandb.Image(img) for img in visualizations]
+        wandb_images = [
+            wandb.Image(visualizations[i].cpu().numpy(), caption=captions[i])
+            for i in range(len(visualizations))
+        ]
         trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
 
         # create a GIF of the predicted frame through each MAR sampling iteration
         wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
         trainer.logger.experiment.log({"mar_sampling_gifs": wandb_gifs}, step=global_step)
-
-        # build masked timestamp rows: keep only idx < batch_nframes[b], else None
-        bnf = batch_nframes.detach().cpu().tolist()
-        ts_raw = timestamps.detach().cpu().tolist()
-        ac = actions.detach().cpu().tolist()
-
-        ts_masked = []
-        for row_ts, valid in zip(ts_raw, bnf):
-            ts_masked.append([row_ts[i] if i < valid else None for i in range(len(row_ts))])
-
-        # column names still T columns, W&B will render None as blank
-        ts_cols = [f"timestamp_{i}" for i in range(len(ts_masked[0]))]
-        ac_cols = [f"action_dim_{i}" for i in range(len(ac[0]))]
-
-        trainer.logger.experiment.log({
-            "timestamps": wandb.Table(data=ts_masked, columns=ts_cols),
-            "actions": wandb.Table(data=ac, columns=ac_cols),
-        }, step=global_step)
     
     def mar_sampling_gifs(self, pl_module, pred_mask_iters, pred_iters):
         device = pl_module.device
