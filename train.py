@@ -2,22 +2,16 @@ import os
 import datetime
 import shutil
 import torch
-
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
-import torch
-from torchvision.utils import save_image
-from torchvision.transforms.functional import resize
-from torchvision.io import read_image
 from einops import rearrange
-
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 import wandb
-
+import os, tempfile
+from torchvision.transforms.functional import to_pil_image
 from world_mar.modules.utils import instantiate_from_config
-from world_mar.dataset.dataloader import MinecraftDataModule
 
 LOG_PARENT = "logs"
 
@@ -62,7 +56,7 @@ class ImageLogger(pl.Callback):
         pred_idx        = pl_module._last_pred_idx                                             # int
         pred_mask       = pl_module._last_pred_mask[:num_to_sample]                            # (B, H_patch*W_patch)
         pred_mask_iters = [mask[:num_to_sample] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
-        pred_iters      = [pred[:num_to_sample] for pred in pl_module._last_pred_iters]        # list of (B, H_patch*W_patch)
+        pred_iters      = [pred[:num_to_sample] for pred in pl_module._last_pred_iters]        # list of (B, H_patch, W_patch, D)
 
         if pl_module._last_ctx_mask is not None:
             ctx_mask = pl_module._last_ctx_mask[:num_to_sample]                                # (B, P-1, H_patch*W_patch)
@@ -93,7 +87,7 @@ class ImageLogger(pl.Callback):
                 x0 =   c   * p * pix_per_lat_w
                 x1 = (c+1) * p * pix_per_lat_w
                 # grey-out the whole patch
-                decoded_inputs_masked[0][i,:, y0:y1, x0:x1] = 191  # ~25% grey
+                decoded_inputs_masked[0][i,:, y0:y1, x0:x1] = 230  # ~10% grey
 
         # white-out masked tokens on other previous non-memory context frames
         if ctx_mask is not None:
@@ -124,6 +118,69 @@ class ImageLogger(pl.Callback):
         # Log to wandb
         wandb_images = [wandb.Image(img) for img in visualizations]
         trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
+
+        # create a GIF of the predicted frame through each MAR sampling iteration
+        wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
+        trainer.logger.experiment.log({"mar_sampling_gifs": wandb_gifs}, step=global_step)
+    
+    def mar_sampling_gifs(self, pl_module, pred_mask_iters, pred_iters):
+        device = pl_module.device
+        num_iters = len(pred_mask_iters)
+        B = len(pred_mask_iters[0])
+
+        wandb_gifs = []
+
+        for batch_idx in range(B):
+            cur_mask = torch.zeros_like(pred_mask_iters[0][0]).to(device)
+            frames = []
+
+            for iter_idx in range(num_iters):
+                # get mask & pred for this sample & iteration
+                pred = pred_iters[iter_idx][batch_idx].to(device)       
+                mask = pred_mask_iters[iter_idx][batch_idx].to(device)
+                cur_mask[mask] = 1
+
+                # prepare for decoding
+                pred = rearrange(pred, "h w d -> 1 (h w) d")
+                pred = pl_module.unpatchify(pred)
+                pred = pred / pl_module.scale_factor
+
+                # decode to pixels
+                pl_module.vae.to(device)
+                with torch.no_grad():
+                    dec = pl_module.vae.decode(pred)
+                    dec = dec.clamp(-1, 1)
+                    dec = ((dec + 1) / 2 * 255).to(torch.uint8).cpu()[0]
+                pl_module.vae.to("cpu")
+
+                # compute pixel‐patch dims
+                C, H_pix, W_pix = dec.shape
+                latent_h, latent_w = pl_module.vae_seq_h, pl_module.vae_seq_w
+                pix_per_lat_h = H_pix // latent_h
+                pix_per_lat_w = W_pix // latent_w
+                p = pl_module.patch_size
+                H_patch = latent_h // p
+                W_patch = latent_w // p
+
+                # grey-out un-diffused tokens on pred frame
+                mask = ~cur_mask.reshape(H_patch, W_patch)
+                rows, cols = mask.nonzero(as_tuple=True)
+                for r, c in zip(rows.tolist(), cols.tolist()):
+                    # lower-left and upper-right patch corners
+                    y0 =   r   * p * pix_per_lat_h
+                    y1 = (r+1) * p * pix_per_lat_h
+                    x0 =   c   * p * pix_per_lat_w
+                    x1 = (c+1) * p * pix_per_lat_w
+                    # grey-out the whole patch
+                    dec[:, y0:y1, x0:x1] = 230  # ~10% grey
+
+                frames.append(dec)
+
+            frames = [torch.full_like(frames[0], 230)] + frames  # add grey frame at the beginning
+            wandb_gif = wandb.Video(torch.stack(frames), fps=1, format="gif")
+            wandb_gifs.append(wandb_gif)
+
+        return wandb_gifs
 
 def get_callbacks(logdir):
     return [

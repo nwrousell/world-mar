@@ -620,7 +620,7 @@ class WorldMAR(pl.LightningModule):
             # what we're actually predicting now -- the exclusion of the next mask and cur mask
             cur_pred_mask = torch.logical_xor(pred_mask, next_pred_mask)
 
-            # do preds 
+            # do preds
             z = z[:, pred_idx, :, :, :]
             z = z + self.diffusion_pos_emb_learned
             z = rearrange(z, "b h w d -> (b h w) d", b=B, h=self.seq_h, w=self.seq_w)
