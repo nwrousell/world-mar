@@ -582,7 +582,9 @@ class WorldMAR(pl.LightningModule):
         scheduler = SequentialLR(
             optim,
             schedulers=[warmup_sched],
-            milestones=[self.warmup_steps]
+            milestones=[]
+            # schedulers=[warmup_sched, cosine_sched],
+            # milestones=[self.warmup_steps]
         )
 
         return {

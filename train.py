@@ -16,7 +16,7 @@ from world_mar.modules.utils import instantiate_from_config
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=1000):
+    def __init__(self, log_every_n_steps=10):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -128,10 +128,7 @@ class ImageLogger(pl.Callback):
             captions.append(f"step={global_step}  ts=[{ts_str}]  action={action_ix}")
 
         # Log to wandb
-        wandb_images = [
-            wandb.Image(visualizations[i].cpu().numpy(), caption=captions[i])
-            for i in range(len(visualizations))
-        ]
+        wandb_images = [wandb.Image(img, caption=caption) for img, caption in zip(visualizations, captions)]
         trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
 
         # create a GIF of the predicted frame through each MAR sampling iteration
