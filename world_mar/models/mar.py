@@ -256,7 +256,7 @@ class WorldMAR(pl.LightningModule):
 
         # determine how many tokens should me masked in each non-memory context frame
         pred_mask_rate = self.mask_ratio_generator.rvs(1)[0] if not masking_rate else masking_rate
-        num_masked_pred = int(np.ceil(HW * pred_mask_rate))
+        num_masked_pred = int(np.floor(HW * pred_mask_rate))
         num_masked_ctx = int(num_masked_pred * self.prev_masking_rate)
 
         # random mask for the frame to be predicted (by default, final frame at index 0)
