@@ -19,6 +19,7 @@ class ImageLogger(pl.Callback):
     def __init__(self, log_every_n_steps=1000):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
+        self.cached_patch_dims = False
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         global_step = trainer.global_step
@@ -26,12 +27,12 @@ class ImageLogger(pl.Callback):
         if global_step % self.log_every_n_steps != 0:
             return
         
-        num_to_sample = 4
-        latents       = batch["frames"].to(pl_module.device)[:num_to_sample]
-        batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:num_to_sample]
-        actions       = batch["action"].to(pl_module.device)[:num_to_sample]
-        poses         = batch["plucker"].to(pl_module.device)[:num_to_sample]
-        timestamps    = batch["timestamps"].to(pl_module.device)[:num_to_sample]
+        self.B = 4
+        latents       = batch["frames"].to(pl_module.device)[:self.B]
+        batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:self.B]
+        actions       = batch["action"].to(pl_module.device)[:self.B]
+        poses         = batch["plucker"].to(pl_module.device)[:self.B]
+        timestamps    = batch["timestamps"].to(pl_module.device)[:self.B]
         
         # sample latents
         pred_latent = pl_module.sample(latents, actions, poses, timestamps, batch_nframes)  # n 576 16
@@ -53,59 +54,38 @@ class ImageLogger(pl.Callback):
 
         # NOTE: the following should be done after pl_module.sample() to get the correct data
         # retrieve token masks and prediction index from forward pass
-        pred_idx        = pl_module._last_pred_idx                                             # int
-        pred_mask       = pl_module._last_pred_mask[:num_to_sample]                            # (B, H_patch*W_patch)
-        pred_mask_iters = [mask[:num_to_sample] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
-        pred_iters      = [pred[:num_to_sample] for pred in pl_module._last_pred_iters]        # list of (B, H_patch, W_patch, D)
+        pred_idx        = pl_module._last_pred_idx                                      # int
+        pred_mask       = pl_module._last_pred_mask[:self.B]                            # (B, H_patch*W_patch)
+        pred_mask_iters = [mask[:self.B] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
+        pred_iters      = [pred[:self.B] for pred in pl_module._last_pred_iters]        # list of (B, H_patch, W_patch, D)
 
         if pl_module._last_ctx_mask is not None:
-            ctx_mask = pl_module._last_ctx_mask[:num_to_sample]                                # (B, P-1, H_patch*W_patch)
+            ctx_mask = pl_module._last_ctx_mask[:self.B]                                    # (B, P-1, H_patch*W_patch)
             ctx_mask_left = ctx_mask[:, :pred_idx, :]
             ctx_mask_middle = torch.zeros_like(pred_mask, dtype=torch.bool).unsqueeze(-2)
             ctx_mask_right = ctx_mask[:, pred_idx:, :]
-            ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)     # (B, P, H_patch*W_patch)
+            ctx_mask = torch.cat([ctx_mask_left, ctx_mask_middle, ctx_mask_right], dim=-2)  # (B, P, H_patch*W_patch)
         else:
             ctx_mask = None
 
         # compute pixel‐patch dims
-        B, C, H_pix, W_pix = decoded_pred.shape
-        latent_h, latent_w = pl_module.vae_seq_h, pl_module.vae_seq_w
-        pix_per_lat_h = H_pix // latent_h
-        pix_per_lat_w = W_pix // latent_w
-        p = pl_module.patch_size
-        H_patch = latent_h // p
-        W_patch = latent_w // p
+        if not self.cached_patch_dims:
+            B, C, H_pix, W_pix = decoded_pred.shape
+            latent_h, latent_w = pl_module.vae_seq_h, pl_module.vae_seq_w
+            self.pix_per_lat_h = H_pix // latent_h
+            self.pix_per_lat_w = W_pix // latent_w
+            self.H_patch = latent_h // pl_module.patch_size
+            self.W_patch = latent_w // pl_module.patch_size
+            self.cached_patch_dims = True
 
-        # grey-out masked tokens on pred frame
-        pred_mask = pred_mask.reshape(B, H_patch, W_patch)
-        for batch_idx in range(B):
-            rows, cols = pred_mask[batch_idx].nonzero(as_tuple=True)
-            for r, c in zip(rows.tolist(), cols.tolist()):
-                # lower-left and upper-right patch corners
-                y0 =   r   * p * pix_per_lat_h
-                y1 = (r+1) * p * pix_per_lat_h
-                x0 =   c   * p * pix_per_lat_w
-                x1 = (c+1) * p * pix_per_lat_w
-                # grey-out the whole patch
-                decoded_inputs_masked[0][batch_idx,:, y0:y1, x0:x1] = 230  # ~10% grey
+        # color masked patches on the target frame 10% grey
+        self.color_masked_patches(pl_module, decoded_inputs_masked[0], pred_mask, 230)
 
-        # white-out masked tokens on other previous non-memory context frames
+        # color masked patches on the context frames white
         if ctx_mask is not None:
             P = ctx_mask.shape[1]
-            ctx_mask = ctx_mask.reshape(B, P, H_patch, W_patch)
             for p_idx in range(P):
-                mask_p = ctx_mask[:, p_idx, :, :]  # (B, H_patch, W_patch)
-                decoded_idx = (len(decoded) - 1) - p_idx
-                for batch_idx in range(B):
-                    rows, cols = mask_p[batch_idx].nonzero(as_tuple=True)
-                    for r, c in zip(rows.tolist(), cols.tolist()):
-                        # lower-left and upper-right patch coners
-                        y0 =   r   * p * pix_per_lat_h
-                        y1 = (r+1) * p * pix_per_lat_h
-                        x0 =   c   * p * pix_per_lat_w
-                        x1 = (c+1) * p * pix_per_lat_w
-                        # white-out the whole patch
-                        decoded_inputs_masked[decoded_idx][batch_idx, :, y0:y1, x0:x1] = 255
+                self.color_masked_patches(pl_module, decoded_inputs_masked[p_idx], ctx_mask[:, p_idx, :], 255)
 
         # three strips attached along width (horizontally)
         masked_strip = torch.cat(list(reversed(decoded_inputs_masked)), dim=-1)
@@ -134,6 +114,21 @@ class ImageLogger(pl.Callback):
         # create a GIF of the predicted frame through each MAR sampling iteration
         wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
         trainer.logger.experiment.log({"mar_sampling_gifs": wandb_gifs}, step=global_step)
+
+    def color_masked_patches(self, pl_module, decoded_frame, mask, color):
+        # color masked patch tokens on pred frame
+        B, C, H, W = decoded_frame.shape
+        mask = mask.reshape(B, self.H_patch, self.W_patch)
+        for batch_idx in range(B):
+            rows, cols = mask[batch_idx].nonzero(as_tuple=True)
+            for r, c in zip(rows.tolist(), cols.tolist()):
+                # lower-left and upper-right patch corners
+                y0 =   r   * pl_module.patch_size * self.pix_per_lat_h
+                y1 = (r+1) * pl_module.patch_size * self.pix_per_lat_h
+                x0 =   c   * pl_module.patch_size * self.pix_per_lat_w
+                x1 = (c+1) * pl_module.patch_size * self.pix_per_lat_w
+                # color the whole patch
+                decoded_frame[batch_idx,:, y0:y1, x0:x1] = color
     
     def mar_sampling_gifs(self, pl_module, pred_mask_iters, pred_iters):
         device = pl_module.device
@@ -165,27 +160,9 @@ class ImageLogger(pl.Callback):
                     dec = ((dec + 1) / 2 * 255).to(torch.uint8).cpu()[0]
                 pl_module.vae.to("cpu")
 
-                # compute pixel‐patch dims
-                C, H_pix, W_pix = dec.shape
-                latent_h, latent_w = pl_module.vae_seq_h, pl_module.vae_seq_w
-                pix_per_lat_h = H_pix // latent_h
-                pix_per_lat_w = W_pix // latent_w
-                p = pl_module.patch_size
-                H_patch = latent_h // p
-                W_patch = latent_w // p
-
-                # grey-out un-diffused tokens on pred frame
-                mask = ~cur_mask.reshape(H_patch, W_patch)
-                rows, cols = mask.nonzero(as_tuple=True)
-                for r, c in zip(rows.tolist(), cols.tolist()):
-                    # lower-left and upper-right patch corners
-                    y0 =   r   * p * pix_per_lat_h
-                    y1 = (r+1) * p * pix_per_lat_h
-                    x0 =   c   * p * pix_per_lat_w
-                    x1 = (c+1) * p * pix_per_lat_w
-                    # grey-out the whole patch
-                    dec[:, y0:y1, x0:x1] = 230  # ~10% grey
-
+                # color un-diffused tokens on pred frame 10% grey
+                mask = ~cur_mask.unqueeze(0)
+                self.color_masked_patches(pl_module, dec, mask, 230)
                 frames.append(dec)
 
             frames = [torch.full_like(frames[0], 230)] + frames  # add grey frame at the beginning
