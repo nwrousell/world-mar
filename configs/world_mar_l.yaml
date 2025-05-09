@@ -12,6 +12,7 @@ model:
     diffloss_w: 512
     num_frames: 4
     prev_masking_rate: 0.25
+    warmstart: True
 
 dataloader:
   target: world_mar.dataset.dataloader.MinecraftDataModule

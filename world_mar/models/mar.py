@@ -52,6 +52,7 @@ class WorldMAR(pl.LightningModule):
         attn_dropout=0.1,
         gradient_clip_val=1.0,
         warmup_steps=40_000,  # TODO: change this depending on dataset size
+        warmstart=False,
         **kwargs
     ):
         super().__init__()
@@ -65,6 +66,7 @@ class WorldMAR(pl.LightningModule):
         self.frame_seq_len = self.seq_h * self.seq_w
         self.num_mem_frames = num_mem_frames
         self.num_prev_frames = num_prev_frames
+        self.warmstart = warmstart
 
         # ----- masking statistics -----
         # ref: masking ratio used by MAR for image gen
@@ -370,7 +372,12 @@ class WorldMAR(pl.LightningModule):
         full_mask = s_mask & t_mask                                                  # (B, T, H+1, W)
 
         # replace ground-truth latent tokens with [MASK] tokens based on full_mask
-        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                 # (B, T, H+1, W, D)
+        if self.warmstart:
+            x[:,0,:,:,:] = torch.where(s_mask[:,0,:,:].unsqueeze(-1), x[:,1,:,:,:] + self.mask_token, x[:,0,:,:,:])                 # (B, T, H+1, W, D)
+        else:
+            x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                 # (B, T, H+1, W, D)
+
+
 
         # add pose and timestamp embeddings
         x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions, batch_nframes, is_decoder=True)  # (B, T, H+1, W, D)
