@@ -22,9 +22,7 @@ class ImageLogger(pl.Callback):
         self.cached_patch_dims = False
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        global_step = trainer.global_step
-
-        if global_step % self.log_every_n_steps != 0:
+        if trainer.global_step % self.log_every_n_steps != 0:
             return
         
         self.B = 4
@@ -34,9 +32,25 @@ class ImageLogger(pl.Callback):
         poses         = batch["plucker"].to(pl_module.device)[:self.B]
         timestamps    = batch["timestamps"].to(pl_module.device)[:self.B]
         
-        # sample latents
+        # run a forward pass with the model
         pred_latent = pl_module.sample(latents, action, poses, timestamps, batch_nframes, prev_masking=True)  # n 576 16
 
+        # NOTE: the following should be done after pl_module.sample() to get the correct data
+        # retrieve token masks and prediction index from forward pass
+        pred_idx        = pl_module._last_pred_idx                                      # int
+        pred_mask       = pl_module._last_pred_mask[:self.B]                            # (B, H_patch*W_patch)
+        pred_mask_iters = [mask[:self.B] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
+        pred_iters      = [pred[:self.B] for pred in pl_module._last_pred_iters]        # list of (B, H_patch, W_patch, D)
+
+        # Log an image showing ground-truth input frames, masked input frames, and predicted target frame
+        wandb_images = self.mar_sampling_images(pl_module, latents, pred_latent, pred_mask, pred_idx, action, timestamps, batch_nframes)
+        trainer.logger.experiment.log({"generated_images": wandb_images}, step=trainer.global_step)
+
+        # Log a GIF of the predicted frame through each MAR sampling iteration
+        wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
+        trainer.logger.experiment.log({"mar_sampling_gifs": wandb_gifs}, step=trainer.global_step)
+    
+    def mar_sampling_images(self, pl_module, latents, pred_latent, pred_mask, pred_idx, action, timestamps, batch_nframes):
         # convert latents to actual frames in pixel-space using Oasis VAE decoder
         B, T, HW, D = latents.shape
         to_decode = torch.cat([*latents.unbind(dim=1), pred_latent], dim=0)
@@ -51,13 +65,6 @@ class ImageLogger(pl.Callback):
         decoded_inputs = decoded[:T]                                          # (T, B, C, H, W)
         decoded_inputs_masked = [frame.clone() for frame in decoded_inputs]   # (T, B, C, H, W)
         decoded_pred = decoded[T]                                             # (B, C, H, W)
-
-        # NOTE: the following should be done after pl_module.sample() to get the correct data
-        # retrieve token masks and prediction index from forward pass
-        pred_idx        = pl_module._last_pred_idx                                      # int
-        pred_mask       = pl_module._last_pred_mask[:self.B]                            # (B, H_patch*W_patch)
-        pred_mask_iters = [mask[:self.B] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
-        pred_iters      = [pred[:self.B] for pred in pl_module._last_pred_iters]        # list of (B, H_patch, W_patch, D)
 
         if pl_module._last_ctx_mask is not None:
             ctx_mask = pl_module._last_ctx_mask[:self.B]                                    # (B, P-1, H_patch*W_patch)
@@ -104,31 +111,11 @@ class ImageLogger(pl.Callback):
         for batch_idx in range(len(visualizations)):
             valid_ts = ts_raw[batch_idx][:bnf[batch_idx]]
             ts_str = ",".join(str(t) for t in reversed(valid_ts))
-            ac_str = ",".join(str(a) for a in ac[batch_idx])
-            captions.append(f"step={global_step}  ts=[{ts_str}]  action=[{ac_str}]")
+            ac_str = ",".join(str(int(a)) for a in ac[batch_idx])
+            captions.append(f"ts=[{ts_str}]  action=[{ac_str}]")
 
-        # Log to wandb
         wandb_images = [wandb.Image(img, caption=caption) for img, caption in zip(visualizations, captions)]
-        trainer.logger.experiment.log({"generated_images": wandb_images}, step=global_step)
-
-        # create a GIF of the predicted frame through each MAR sampling iteration
-        wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
-        trainer.logger.experiment.log({"mar_sampling_gifs": wandb_gifs}, step=global_step)
-
-    def color_masked_patches(self, pl_module, decoded_frame, mask, color):
-        # color masked patch tokens on pred frame
-        B, C, H, W = decoded_frame.shape
-        mask = mask.reshape(B, self.H_patch, self.W_patch)
-        for batch_idx in range(B):
-            rows, cols = mask[batch_idx].nonzero(as_tuple=True)
-            for r, c in zip(rows.tolist(), cols.tolist()):
-                # lower-left and upper-right patch corners
-                y0 =   r   * pl_module.patch_size * self.pix_per_lat_h
-                y1 = (r+1) * pl_module.patch_size * self.pix_per_lat_h
-                x0 =   c   * pl_module.patch_size * self.pix_per_lat_w
-                x1 = (c+1) * pl_module.patch_size * self.pix_per_lat_w
-                # color the whole patch
-                decoded_frame[batch_idx,:, y0:y1, x0:x1] = color
+        return wandb_images
     
     def mar_sampling_gifs(self, pl_module, pred_mask_iters, pred_iters):
         device = pl_module.device
@@ -170,6 +157,21 @@ class ImageLogger(pl.Callback):
             wandb_gifs.append(wandb_gif)
 
         return wandb_gifs
+
+    def color_masked_patches(self, pl_module, decoded_frame, mask, color):
+        # color masked patch tokens on pred frame
+        B, C, H, W = decoded_frame.shape
+        mask = mask.reshape(B, self.H_patch, self.W_patch)
+        for batch_idx in range(B):
+            rows, cols = mask[batch_idx].nonzero(as_tuple=True)
+            for r, c in zip(rows.tolist(), cols.tolist()):
+                # lower-left and upper-right patch corners
+                y0 =   r   * pl_module.patch_size * self.pix_per_lat_h
+                y1 = (r+1) * pl_module.patch_size * self.pix_per_lat_h
+                x0 =   c   * pl_module.patch_size * self.pix_per_lat_w
+                x1 = (c+1) * pl_module.patch_size * self.pix_per_lat_w
+                # color the whole patch
+                decoded_frame[batch_idx,:, y0:y1, x0:x1] = color
 
 def get_callbacks(logdir):
     return [
