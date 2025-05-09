@@ -30,12 +30,12 @@ class ImageLogger(pl.Callback):
         self.B = 4
         latents       = batch["frames"].to(pl_module.device)[:self.B]
         batch_nframes = batch["num_non_padding_frames"].to(pl_module.device)[:self.B]
-        actions       = batch["action"].to(pl_module.device)[:self.B]
+        action        = batch["action"].to(pl_module.device)[:self.B]
         poses         = batch["plucker"].to(pl_module.device)[:self.B]
         timestamps    = batch["timestamps"].to(pl_module.device)[:self.B]
         
         # sample latents
-        pred_latent = pl_module.sample(latents, actions, poses, timestamps, batch_nframes, prev_masking=True)  # n 576 16
+        pred_latent = pl_module.sample(latents, action, poses, timestamps, batch_nframes, prev_masking=True)  # n 576 16
 
         # convert latents to actual frames in pixel-space using Oasis VAE decoder
         B, T, HW, D = latents.shape
@@ -98,13 +98,13 @@ class ImageLogger(pl.Callback):
         # build per‐sample image captions
         bnf = batch_nframes.detach().cpu().tolist()
         ts_raw = timestamps.detach().cpu().tolist()
-        ac = actions.detach().cpu().tolist()
+        ac = action.detach().cpu().tolist()
 
         captions = []
         for batch_idx in range(len(visualizations)):
             valid_ts = ts_raw[batch_idx][:bnf[batch_idx]]
             ts_str = ",".join(str(t) for t in reversed(valid_ts))
-            ac_str = ",".join(str(a) for a in ac)
+            ac_str = ",".join(str(a) for a in ac[batch_idx])
             captions.append(f"step={global_step}  ts=[{ts_str}]  action=[{ac_str}]")
 
         # Log to wandb
