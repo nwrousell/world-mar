@@ -400,7 +400,7 @@ class MinecraftDataset(Dataset):
             target_pose=pose_matrix[frame_idx],
             other_poses=pose_matrix[candidate_ctx_indices], 
             points=self.points, 
-            min_overlap=0.1, 
+            min_overlap=0.0, 
             k=self.num_context_frames,
             num_prev_frames=min(self.num_prev_frames, len(candidate_ctx_indices))
         )

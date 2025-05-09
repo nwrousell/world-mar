@@ -347,7 +347,7 @@ def get_most_relevant_poses_to_target(target_pose, other_poses, points, num_prev
 
     for _ in range(k - len(forced_prev_frame_indices)):
         # exit the retrieval loop if there aren't enough new points left
-        if in_fov1.sum() < min_overlap_points:
+        if in_fov1.sum() <= min_overlap_points:
             break
 
         # add recency bias
