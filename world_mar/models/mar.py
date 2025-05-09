@@ -46,7 +46,7 @@ class WorldMAR(pl.LightningModule):
         encoder_depth=8, encoder_num_heads=8,
         decoder_depth=8, decoder_num_heads=8,
         diffloss_w=256, diffloss_d=3, num_sampling_steps='100', diffusion_batch_mul=4,
-        prev_masking_rate=0.5,
+        prev_masking_rate=0.25,
         mask_ratio_min=0.7,
         proj_dropout=0.1,
         attn_dropout=0.1,
@@ -248,7 +248,7 @@ class WorldMAR(pl.LightningModule):
         perms = torch.stack(perms, dim=0)                                            # (B, HW)
         return perms  # (B, HW)
 
-    def random_masking(self, x, masking_rate=None, custom_orders=None, prev_masking=True):
+    def random_masking(self, x, upper_bound=None, masking_rate=None, custom_orders=None, prev_masking=True):
         B, T, H, W, D = x.shape
         P = self.num_prev_frames
         HW = self.frame_seq_len
@@ -257,6 +257,8 @@ class WorldMAR(pl.LightningModule):
         # determine how many tokens should me masked in each non-memory context frame
         pred_mask_rate = self.mask_ratio_generator.rvs(1)[0] if not masking_rate else masking_rate
         num_masked_pred = int(np.floor(HW * pred_mask_rate))
+        if upper_bound is not None:
+            num_masked_pred = min(num_masked_pred, upper_bound)
         num_masked_ctx = int(num_masked_pred * self.prev_masking_rate)
 
         # random mask for the frame to be predicted (by default, final frame at index 0)
@@ -622,15 +624,21 @@ class WorldMAR(pl.LightningModule):
         self._last_pred_masks_iters = []
         self._last_pred_iters = []
 
+        prev_masked = self.seq_h * self.seq_w
         for step in range(mar_iters):
             # get prediction with cur state of masks
             _, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, batch_nframes, pred_idx, padding_mask)
 
             # decide on next masking rate, dictating which we actually predict here
             masking_rate = np.cos(math.pi / 2.0 * (step + 1) / mar_iters)
-            next_pred_mask, _ = self.random_masking(x, masking_rate=masking_rate, custom_orders=orders, prev_masking=prev_masking)
+            # randomly generate the next set of token indices to diffuse over
+            next_pred_mask, _ = self.random_masking(x, upper_bound=prev_masked-1, masking_rate=masking_rate, custom_orders=orders, prev_masking=prev_masking)
             # what we're actually predicting now -- the exclusion of the next mask and cur mask
             cur_pred_mask = torch.logical_xor(pred_mask, next_pred_mask)
+            # track the number of tokens that still need to be diffused after this iteration
+            sum = cur_pred_mask[0].sum().detach().item()
+            assert sum != 0
+            prev_masked -= sum
 
             # do preds
             z = z[:, pred_idx, :, :, :]
@@ -649,7 +657,8 @@ class WorldMAR(pl.LightningModule):
 
             # update mask for next iter
             pred_mask = next_pred_mask
-
+        
+        assert prev_masked == 0
         x_pred = x[:,pred_idx,:,:,:]
         x_pred = rearrange(x_pred, "b h w d -> b (h w) d")
         x_pred = self.unpatchify(x_pred)

@@ -19,7 +19,7 @@ class ImageLogger(pl.Callback):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
         self.cached_patch_dims = False
-        self.mar_iters = [4, 16]
+        self.mar_iters = [1, 32]
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if trainer.global_step % self.log_every_n_steps != 0:
@@ -34,9 +34,9 @@ class ImageLogger(pl.Callback):
         
         for mar_iters in self.mar_iters:
             # run a forward pass with the model
-            pred_latent = pl_module.sample(latents, action, poses, timestamps, batch_nframes, mar_iters=mar_iters, pred_idx=0, prev_masking=True)
+            pred_latent = pl_module.sample(latents, action, poses, timestamps, batch_nframes, mar_iters=mar_iters, pred_idx=0, prev_masking=False)
 
-            # NOTE: the following should be done after pl_module.sample() to get the correct data
+            # NOTE: The following should be done after pl_module.sample() to get the correct data
             # retrieve token masks and prediction index from forward pass
             pred_idx        = pl_module._last_pred_idx                                      # int
             pred_mask       = pl_module._last_pred_mask[:self.B]                            # (B, H_patch*W_patch)
