@@ -9,8 +9,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 import wandb
-import os, tempfile
-from torchvision.transforms.functional import to_pil_image
+import os, imageio
 from world_mar.modules.utils import instantiate_from_config
 
 LOG_PARENT = "logs"
@@ -50,8 +49,10 @@ class ImageLogger(pl.Callback):
             trainer.logger.experiment.log({f"{mar_iters}_mar_iters_img": wandb_images}, step=trainer.global_step)
 
             # Log a GIF of the predicted frame through each MAR sampling iteration
-            wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
+            wandb_gifs, paths = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
             trainer.logger.experiment.log({f"{mar_iters}_mar_iters_gif": wandb_gifs}, step=trainer.global_step)
+            for path in paths:
+                os.remove(path)
     
     def mar_sampling_images(self, pl_module, latents, pred_latent, pred_mask, pred_idx, action, timestamps, batch_nframes):
         # convert latents to actual frames in pixel-space using Oasis VAE decoder
@@ -127,6 +128,7 @@ class ImageLogger(pl.Callback):
         B = len(pred_mask_iters[0])
 
         wandb_gifs = []
+        paths = []
 
         for batch_idx in range(B):
             cur_mask = torch.zeros_like(pred_mask_iters[0][0]).to(device)
@@ -156,11 +158,23 @@ class ImageLogger(pl.Callback):
                 self.color_masked_patches(pl_module, dec, mask, 230)
                 frames.append(dec.squeeze(0))
 
+            # prepare list of frames to convert into GIF
             frames = [torch.full_like(frames[0], 230)] + frames  # add grey frame at the beginning
-            wandb_gif = wandb.Video(torch.stack(frames), fps=len(frames) / 4, format="gif")  # 4s long
-            wandb_gifs.append(wandb_gif)
+            frames = torch.stack(frames, dim=0)                  # (N, C, H, W)
+            frames = frames.permute(0, 2, 3, 1).cpu().numpy()    # (N, H, W, C)
+           
+            # generate the GIF
+            temp_dir = "temp"
+            os.makedirs(temp_dir, exist_ok=True)
+            path = os.path.join(temp_dir, f"temp_{batch_idx}.gif")
+            imageio.mimwrite(path, frames, fps=len(frames)/5, loop=0)  # 5 seconds long
+            wandb_gif = wandb.Video(path)
 
-        return wandb_gifs
+            # append GIF to lists (include path for cleanup)
+            wandb_gifs.append(wandb_gif)
+            paths.append(path)
+
+        return wandb_gifs, paths
 
     def color_masked_patches(self, pl_module, decoded_frame, mask, color):
         # color masked patch tokens on pred frame

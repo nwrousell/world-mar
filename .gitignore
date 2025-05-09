@@ -90,11 +90,11 @@ venv.bak/
 **/*.ckpt
 **/*.safetensors
 
-# Data
-data
+# Data and logging
+data/
+logs/
+wandb/
+temp/
 
 # DS Store
 **/*.DS_store
-
-logs/
-wandb/
