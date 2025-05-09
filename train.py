@@ -16,10 +16,11 @@ from world_mar.modules.utils import instantiate_from_config
 LOG_PARENT = "logs"
 
 class ImageLogger(pl.Callback):
-    def __init__(self, log_every_n_steps=1000):
+    def __init__(self, log_every_n_steps=2000):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
         self.cached_patch_dims = False
+        self.mar_iters = [4, 16]
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if trainer.global_step % self.log_every_n_steps != 0:
@@ -32,23 +33,25 @@ class ImageLogger(pl.Callback):
         poses         = batch["plucker"].to(pl_module.device)[:self.B]
         timestamps    = batch["timestamps"].to(pl_module.device)[:self.B]
         
-        # run a forward pass with the model
-        pred_latent = pl_module.sample(latents, action, poses, timestamps, batch_nframes, prev_masking=True)  # n 576 16
+        for mar_iters in self.mar_iters:
+            # run a forward pass with the model
+            pred_latent = pl_module.sample(latents, action, poses, timestamps, batch_nframes, mar_iters=mar_iters, pred_idx=0, prev_masking=True)
 
-        # NOTE: the following should be done after pl_module.sample() to get the correct data
-        # retrieve token masks and prediction index from forward pass
-        pred_idx        = pl_module._last_pred_idx                                      # int
-        pred_mask       = pl_module._last_pred_mask[:self.B]                            # (B, H_patch*W_patch)
-        pred_mask_iters = [mask[:self.B] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
-        pred_iters      = [pred[:self.B] for pred in pl_module._last_pred_iters]        # list of (B, H_patch, W_patch, D)
+            # NOTE: the following should be done after pl_module.sample() to get the correct data
+            # retrieve token masks and prediction index from forward pass
+            pred_idx        = pl_module._last_pred_idx                                      # int
+            pred_mask       = pl_module._last_pred_mask[:self.B]                            # (B, H_patch*W_patch)
+            pred_mask_iters = [mask[:self.B] for mask in pl_module._last_pred_masks_iters]  # list of (B, H_patch*W_patch)
+            pred_iters      = [pred[:self.B] for pred in pl_module._last_pred_iters]        # list of (B, H_patch, W_patch, D)
+            assert len(pred_iters) == len(pred_mask_iters) == mar_iters
 
-        # Log an image showing ground-truth input frames, masked input frames, and predicted target frame
-        wandb_images = self.mar_sampling_images(pl_module, latents, pred_latent, pred_mask, pred_idx, action, timestamps, batch_nframes)
-        trainer.logger.experiment.log({"generated_images": wandb_images}, step=trainer.global_step)
+            # Log an image showing ground-truth input frames, masked input frames, and predicted target frame
+            wandb_images = self.mar_sampling_images(pl_module, latents, pred_latent, pred_mask, pred_idx, action, timestamps, batch_nframes)
+            trainer.logger.experiment.log({f"{mar_iters}_mar_iters_img": wandb_images}, step=trainer.global_step)
 
-        # Log a GIF of the predicted frame through each MAR sampling iteration
-        wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
-        trainer.logger.experiment.log({"mar_sampling_gifs": wandb_gifs}, step=trainer.global_step)
+            # Log a GIF of the predicted frame through each MAR sampling iteration
+            wandb_gifs = self.mar_sampling_gifs(pl_module, pred_mask_iters, pred_iters)
+            trainer.logger.experiment.log({f"{mar_iters}_mar_iters_gif": wandb_gifs}, step=trainer.global_step)
     
     def mar_sampling_images(self, pl_module, latents, pred_latent, pred_mask, pred_idx, action, timestamps, batch_nframes):
         # convert latents to actual frames in pixel-space using Oasis VAE decoder
@@ -110,8 +113,9 @@ class ImageLogger(pl.Callback):
         captions = []
         for batch_idx in range(len(visualizations)):
             valid_ts = ts_raw[batch_idx][:bnf[batch_idx]]
+            ac_idxs = [i for i, a in enumerate(ac[batch_idx]) if a > 0.0]
             ts_str = ",".join(str(t) for t in reversed(valid_ts))
-            ac_str = ",".join(str(int(a)) for a in ac[batch_idx])
+            ac_str = ",".join(str(i) for i in ac_idxs)
             captions.append(f"ts=[{ts_str}]  action=[{ac_str}]")
 
         wandb_images = [wandb.Image(img, caption=caption) for img, caption in zip(visualizations, captions)]
@@ -119,7 +123,7 @@ class ImageLogger(pl.Callback):
     
     def mar_sampling_gifs(self, pl_module, pred_mask_iters, pred_iters):
         device = pl_module.device
-        num_iters = len(pred_mask_iters)
+        mar_iters = len(pred_mask_iters)
         B = len(pred_mask_iters[0])
 
         wandb_gifs = []
@@ -128,7 +132,7 @@ class ImageLogger(pl.Callback):
             cur_mask = torch.zeros_like(pred_mask_iters[0][0]).to(device)
             frames = []
 
-            for iter_idx in range(num_iters):
+            for iter_idx in range(mar_iters):
                 # get mask & pred for this sample & iteration
                 pred = pred_iters[iter_idx][batch_idx].to(device)       
                 mask = pred_mask_iters[iter_idx][batch_idx].to(device)
@@ -153,7 +157,7 @@ class ImageLogger(pl.Callback):
                 frames.append(dec.squeeze(0))
 
             frames = [torch.full_like(frames[0], 230)] + frames  # add grey frame at the beginning
-            wandb_gif = wandb.Video(torch.stack(frames), fps=1, format="gif")
+            wandb_gif = wandb.Video(torch.stack(frames), fps=len(frames) / 4, format="gif")  # 4s long
             wandb_gifs.append(wandb_gif)
 
         return wandb_gifs

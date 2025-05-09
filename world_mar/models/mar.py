@@ -596,7 +596,7 @@ class WorldMAR(pl.LightningModule):
             }
         }
 
-    def sample(self, x, actions, poses, timestamps, batch_nframes, num_mar_iters=4, pred_idx=0, prev_masking=False):
+    def sample(self, x, actions, poses, timestamps, batch_nframes, mar_iters=4, pred_idx=0, prev_masking=False):
         B, L = len(x), self.num_frames * self.frame_seq_len
 
         # scale the input tensor x to match a standard normal distribution
@@ -621,13 +621,13 @@ class WorldMAR(pl.LightningModule):
         self._last_ctx_mask = (ctx_mask.detach().cpu() if ctx_mask is not None else None)
         self._last_pred_masks_iters = []
         self._last_pred_iters = []
-        
-        for step in range(num_mar_iters):
+
+        for step in range(mar_iters):
             # get prediction with cur state of masks
             _, z = self.masked_encoder_decoder(x, actions, poses, timestamps, pred_mask, ctx_mask, batch_nframes, pred_idx, padding_mask)
 
             # decide on next masking rate, dictating which we actually predict here
-            masking_rate = np.cos(math.pi / 2. * (step + 1) / num_mar_iters)
+            masking_rate = np.cos(math.pi / 2.0 * (step + 1) / mar_iters)
             next_pred_mask, _ = self.random_masking(x, masking_rate=masking_rate, custom_orders=orders, prev_masking=prev_masking)
             # what we're actually predicting now -- the exclusion of the next mask and cur mask
             cur_pred_mask = torch.logical_xor(pred_mask, next_pred_mask)
