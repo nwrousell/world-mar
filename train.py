@@ -157,13 +157,13 @@ class ImageLogger(pl.Callback):
                 with torch.no_grad():
                     dec = pl_module.vae.decode(pred)
                     dec = dec.clamp(-1, 1)
-                    dec = ((dec + 1) / 2 * 255).to(torch.uint8).cpu()[0]
+                    dec = ((dec + 1) / 2 * 255).to(torch.uint8).cpu()
                 pl_module.vae.to("cpu")
 
                 # color un-diffused tokens on pred frame 10% grey
-                mask = ~cur_mask.unqueeze(0)
+                mask = ~cur_mask.unsqueeze(0)
                 self.color_masked_patches(pl_module, dec, mask, 230)
-                frames.append(dec)
+                frames.append(dec.squeeze(0))
 
             frames = [torch.full_like(frames[0], 230)] + frames  # add grey frame at the beginning
             wandb_gif = wandb.Video(torch.stack(frames), fps=1, format="gif")

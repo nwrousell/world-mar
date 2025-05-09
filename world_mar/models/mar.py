@@ -256,7 +256,7 @@ class WorldMAR(pl.LightningModule):
 
         # determine how many tokens should me masked in each non-memory context frame
         pred_mask_rate = self.mask_ratio_generator.rvs(1)[0] if not masking_rate else masking_rate
-        num_masked_pred = int(np.ceil(HW * pred_mask_rate))
+        num_masked_pred = int(np.floor(HW * pred_mask_rate))
         num_masked_ctx = int(num_masked_pred * self.prev_masking_rate)
 
         # random mask for the frame to be predicted (by default, final frame at index 0)
@@ -368,7 +368,7 @@ class WorldMAR(pl.LightningModule):
         full_mask = s_mask & t_mask                                                  # (B, T, H+1, W)
 
         # replace ground-truth latent tokens with [MASK] tokens based on full_mask
-        x = torch.where(full_mask.unsqueeze(-1), self.mask_token, x)                 # (B, T, H+1, W, D)
+        x[:,0,:,:,:] = torch.where(s_mask[:,0,:,:].unsqueeze(-1), x[:,1,:,:,:] + self.mask_token, x[:,0,:,:,:])                 # (B, T, H+1, W, D) 
 
         # add pose and timestamp embeddings
         x = self.add_pose_action_timestamp_embeddings(x, poses, timestamps, actions, batch_nframes, is_decoder=True)  # (B, T, H+1, W, D)
