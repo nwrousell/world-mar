@@ -1,4 +1,4 @@
-# pasted from https://github.com/minerllabs/basalt-2022-behavioural-cloning-baseline/blob/main/utils/download_dataset.py
+# pasted from https://github.com/minerll
 
 # A script to download OpenAI contractor data or BASALT datasets
 # using the shared .json files (index file).
@@ -40,6 +40,7 @@ parser = argparse.ArgumentParser(description="Download OpenAI contractor dataset
 # parser.add_argument("--json-file", type=str, required=True, help="Path to the index .json file")
 # parser.add_argument("--num-demos", type=int, default=None, help="Maximum number of demonstrations to download")
 parser.add_argument("--output-dir", type=str, required=True, help="Path to the output directory")
+parser.add_argument("--split", type=int, required=True, help="Which split of the dataset to download (1 or 2)")
 
 CONFIG_PATH = "configs/world_mar.yaml"
 
@@ -295,6 +296,7 @@ def count_bin_files_per_demo(dataset_dir: str):
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    assert args.split == 1 or args.split == 2, "split should be 1 or 2"
     
     demonstration_id_to_num_frames = count_bin_files_per_demo(args.output_dir)
     counts_dict = { 
@@ -304,21 +306,21 @@ if __name__ == "__main__":
     with open(os.path.join(args.output_dir, "counts.json"), "wt") as f:
         json.dump(counts_dict, f)
 
-    # basedir, relpaths = get_paths(args.json_file, args.output_dir, args.num_demos)
-    # relpaths = list(relpaths)
-    # d = {
-    #     "basedir": basedir,
-    #     "split1": relpaths[::2],
-    #     "split2": relpaths[1::2]
-    # }
-    # with open("splits.json", "rt") as f:
-    #     d = json.load(f)
+    basedir, relpaths = get_paths(args.json_file, args.output_dir, args.num_demos)
+    relpaths = list(relpaths)
+    d = {
+        "basedir": basedir,
+        "split1": relpaths[::2],
+        "split2": relpaths[1::2]
+    }
+    with open("splits.json", "rt") as f:
+        d = json.load(f)
     
     # download mp4s and jsons with a bunch o' threads
-    # basedir, relpaths = d["basedir"], d["split1"]
-    # relpaths = relpaths_to_download(relpaths, args.output_dir)
-    # download_minecraft_data(basedir, relpaths, args.output_dir)
+    basedir, relpaths = d["basedir"], d[f"split{args.split}"]
+    relpaths = relpaths_to_download(relpaths, args.output_dir)
+    download_minecraft_data(basedir, relpaths, args.output_dir)
 
     # use 2 procs (each with with a gpu) to precompute latents
-    # precompute_latents(args.output_dir)
+    precompute_latents(args.output_dir)
 
